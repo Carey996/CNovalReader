@@ -8,11 +8,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Build for iOS Simulator
 xcodebuild -scheme CNovalReader -destination 'platform=iOS Simulator,name=iPhone 17' build
 
-# Build for any iOS Simulator
-xcodebuild -scheme CNovalReader -destination 'generic/platform=iOS Simulator' build
+# Run tests
+xcodebuild test -scheme CNovalReader -destination 'platform=iOS Simulator,name=iPhone 17'
 
-# Build for device
-xcodebuild -scheme CNovalReader -destination 'generic/platform=iOS' build
+# Run a single test
+xcodebuild test -scheme CNovalReader -destination 'platform=iOS Simulator,name=iPhone 17' -only-testing:CNovalReaderTests/BookTests/testBookInitialization
 ```
 
 ## Project Overview
@@ -68,3 +68,11 @@ Downloaded books are stored in `Documents/Books/` via FileManagerService. The `B
 ### Supported Formats
 
 EPUB, PDF, TXT, MOBI, AZW3, FB2 (validated in DownloadViewModel)
+
+### Testing
+
+Tests use Swift Testing framework (`@Testing`) with `@testable import CNovalReader`. Test file is at `CNovalReaderTests/CNovalReaderTests.swift` with test suites:
+- `BookTests` - Model initialization and status transitions
+- `DownloadErrorTests` - Error descriptions and recovery suggestions
+- `URLExtensionsTests` - URL parsing and file handling
+- `DownloadStatusTests` - Status display text
