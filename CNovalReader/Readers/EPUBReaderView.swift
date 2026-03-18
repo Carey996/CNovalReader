@@ -10,6 +10,7 @@ struct EPUBReaderView: View {
     @State private var errorMessage: String?
     @State private var showChapterList: Bool = false
     @State private var showSettings: Bool = false
+    @State private var showContent: Bool = false
     @ObservedObject private var settings = ReaderSettings.shared
     
     @Environment(\.dismiss) private var dismiss
@@ -28,8 +29,10 @@ struct EPUBReaderView: View {
                     loadingView
                 } else if let error = errorMessage {
                     errorView(error)
-                } else {
+                } else if showContent {
                     contentView
+                } else {
+                    loadingView
                 }
                 
                 bottomToolbar
@@ -45,7 +48,6 @@ struct EPUBReaderView: View {
         }
         .onAppear {
             Task { await loadContent() }
-            restoreReadingPosition()
         }
         .onDisappear {
             saveReadingPosition()
@@ -100,25 +102,39 @@ struct EPUBReaderView: View {
     // MARK: - 内容视图
     
     private var contentView: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                if let chapter = epubBook?.chapters[currentChapterIndex] {
-                    Text(chapter.title)
-                        .font(.title2)
-                        .fontWeight(.bold)
-                        .foregroundColor(Color(hex: settings.currentTextColor) ?? .white)
-                        .padding(.bottom, 8)
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    if let chapter = epubBook?.chapters[currentChapterIndex] {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(chapter.title)
+                                .font(.title2)
+                                .fontWeight(.bold)
+                                .foregroundColor(Color(hex: settings.currentTextColor) ?? .white)
+                                .padding(.bottom, 8)
+                                .id(chapter.id)
+                            
+                            Text(chapterContent)
+                                .font(.system(size: settings.fontSize))
+                                .foregroundColor(Color(hex: settings.currentTextColor) ?? .white)
+                                .lineSpacing(settings.lineSpacing)
+                                .multilineTextAlignment(.leading)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+                    }
                 }
-                
-                Text(chapterContent)
-                    .font(.system(size: settings.fontSize))
-                    .foregroundColor(Color(hex: settings.currentTextColor) ?? .white)
-                    .lineSpacing(settings.lineSpacing)
-                    .multilineTextAlignment(.leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 12)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
+            .onChange(of: currentChapterIndex) { _, newIndex in
+                if let chapters = epubBook?.chapters, newIndex < chapters.count {
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        proxy.scrollTo(chapters[newIndex].id, anchor: .top)
+                    }
+                }
+            }
         }
     }
     
@@ -232,11 +248,12 @@ struct EPUBReaderView: View {
         .presentationDetents([.medium, .large])
     }
     
-    // MARK: - 加载内容
+    // MARK: - 加载内容 (优化版 - 先显示元数据，后加载内容)
     
     private func loadContent() async {
         isLoading = true
         errorMessage = nil
+        showContent = false
         
         guard let fileName = book.localFileName else {
             errorMessage = "书籍文件未找到"
@@ -247,19 +264,40 @@ struct EPUBReaderView: View {
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         let bookPath = documentsPath.appendingPathComponent("Books").appendingPathComponent(fileName)
         
+        // 先尝试从缓存获取
+        if let cached = await parsingService.getCachedBook(fileName: fileName) {
+            epubBook = cached
+            isLoading = false
+            showContent = true
+            
+            // 恢复阅读位置
+            restoreReadingPosition()
+            
+            // 后台加载章节内容
+            await loadChapter(currentChapterIndex)
+            return
+        }
+        
         do {
             epubBook = try await parsingService.parse(fileURL: bookPath)
             
             if let book = epubBook, !book.chapters.isEmpty {
-                await loadChapter(0)
+                isLoading = false
+                showContent = true
+                
+                // 恢复阅读位置
+                restoreReadingPosition()
+                
+                // 立即加载当前章节
+                await loadChapter(currentChapterIndex)
             } else {
                 errorMessage = "未能解析出章节内容"
+                isLoading = false
             }
         } catch {
             errorMessage = "解析失败: \(error.localizedDescription)"
+            isLoading = false
         }
-        
-        isLoading = false
     }
     
     private func loadChapter(_ index: Int) async {

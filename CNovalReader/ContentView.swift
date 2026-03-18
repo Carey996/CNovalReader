@@ -1,4 +1,6 @@
 import SwiftUI
+import SwiftUI
+import UIKit
 import SwiftData
 
 // MARK: - 书柜风格主题色
@@ -52,6 +54,8 @@ struct BookshelfTheme {
 struct BookSpineView: View {
     let book: Book
     let spineWidth: CGFloat
+    @State private var showDetail = false
+    @State private var showReader = false
 
     var body: some View {
         let colors = BookshelfTheme.spineColors(for: book.fileExtension)
@@ -110,10 +114,47 @@ struct BookSpineView: View {
                     .fill(colors.shadow.opacity(0.6))
                     .frame(height: 3)
             }
+            
+            // 右上角信息按钮
+            VStack {
+                HStack {
+                    Spacer()
+                    Button {
+                        showDetail = true
+                    } label: {
+                        Image(systemName: "info.circle.fill")
+                            .font(.system(size: spineWidth * 0.35))
+                            .foregroundColor(.white.opacity(0.8))
+                            .background(
+                                Circle()
+                                    .fill(Color.black.opacity(0.3))
+                                    .frame(width: spineWidth * 0.45, height: spineWidth * 0.45)
+                            )
+                    }
+                    .padding(4)
+                }
+                Spacer()
+            }
         }
         .frame(width: spineWidth, height: 150)
         .shadow(color: .black.opacity(0.35), radius: 3, x: 2, y: 4)
         .shadow(color: colors.shadow.opacity(0.2), radius: 1, x: -1, y: 1)
+        .onTapGesture {
+            // 点击书脊直接进入阅读
+            if book.localFileName != nil {
+                showReader = true
+            }
+        }
+        .sheet(isPresented: $showDetail) {
+            NavigationStack {
+                BookDetailView(book: book)
+            }
+        }
+        .fullScreenCover(isPresented: $showReader) {
+            if #available(iOS 17.0, *) {
+                ReaderView(book: book)
+            }
+        }
     }
 }
 
@@ -127,9 +168,7 @@ struct BookshelfRow: View {
             // 书架层内容（书脊）
             HStack(alignment: .bottom, spacing: 6) {
                 ForEach(books) { book in
-                    NavigationLink { BookDetailView(book: book) } label: {
-                        BookSpineView(book: book, spineWidth: spineWidth)
-                    }
+                    BookSpineView(book: book, spineWidth: spineWidth)
                     .buttonStyle(.plain)
                 }
 
@@ -436,25 +475,22 @@ struct ContentView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(alignment: .bottom, spacing: 12) {
                     ForEach(recentBooks.prefix(6)) { book in
-                        NavigationLink { BookDetailView(book: book) } label: {
-                            VStack(spacing: 4) {
-                                RecentBookCover(book: book)
-                                Text(book.title)
-                                    .font(.caption2)
-                                    .foregroundColor(BookshelfTheme.shelfDark)
-                                    .lineLimit(2)
-                                    .frame(width: 80)
-                                    .multilineTextAlignment(.center)
-
-                                if let position = book.readingPosition {
-                                    ProgressView(value: position)
-                                        .progressViewStyle(.linear)
-                                        .frame(width: 60)
-                                        .tint(BookshelfTheme.accentGold)
+                        RecentBookCover(book: book)
+                        .onTapGesture {
+                            if book.localFileName != nil {
+                                // 直接进入阅读
+                                if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                                   let rootVC = windowScene.windows.first?.rootViewController {
+                                    let readerView = UIHostingController(rootView: AnyView(Group {
+                                        if #available(iOS 17.0, *) {
+                                            ReaderView(book: book)
+                                        }
+                                    }))
+                                    readerView.modalPresentationStyle = .fullScreen
+                                    rootVC.present(readerView, animated: true)
                                 }
                             }
                         }
-                        .buttonStyle(.plain)
                     }
                 }
                 .padding(.horizontal, 16)

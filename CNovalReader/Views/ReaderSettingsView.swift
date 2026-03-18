@@ -2,9 +2,13 @@ import SwiftUI
 
 struct ReaderSettingsView: View {
     @ObservedObject var settings = ReaderSettings.shared
+    @StateObject private var fontDownloadService = FontDownloadService.shared
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @State private var showResetConfirmation = false
+    @State private var showFontDownloadSheet = false
+    @State private var fontDownloadURL = ""
+    @State private var fontDownloadName = ""
     
     private var isDarkMode: Bool {
         if settings.colorSchemeOverride == 0 {
@@ -61,9 +65,27 @@ struct ReaderSettingsView: View {
                 // 字体选择
                 Section("字体") {
                     Picker("字体", selection: $settings.fontFamily) {
-                        ForEach(ReaderSettings.fonts, id: \.self) { font in
-                            Text(font).tag(font)
+                        // 内置字体
+                        Section(header: Text("内置字体")) {
+                            ForEach(ReaderSettings.builtInFonts, id: \.name) { font in
+                                Text(font.displayName).tag(font.name)
+                            }
                         }
+                        
+                        // 自定义字体
+                        if !settings.customFonts.isEmpty {
+                            Section(header: Text("自定义字体")) {
+                                ForEach(settings.customFonts, id: \.self) { fontName in
+                                    Text(fontName).tag(fontName)
+                                }
+                            }
+                        }
+                    }
+                    
+                    Button {
+                        showFontDownloadSheet = true
+                    } label: {
+                        Label("下载自定义字体", systemImage: "arrow.down.circle")
                     }
                 }
                 
@@ -191,6 +213,116 @@ struct ReaderSettingsView: View {
                 Button("取消", role: .cancel) {}
             } message: {
                 Text("确定要恢复所有设置为默认值吗？")
+            }
+            .sheet(isPresented: $showFontDownloadSheet) {
+                FontDownloadSheet(isPresented: $showFontDownloadSheet)
+            }
+        }
+    }
+}
+
+// MARK: - 字体下载表单
+struct FontDownloadSheet: View {
+    @Binding var isPresented: Bool
+    @StateObject private var fontDownloadService = FontDownloadService.shared
+    @State private var fontURL = ""
+    @State private var fontName = ""
+    @State private var isDownloading = false
+    @State private var showError = false
+    @State private var errorMessage = ""
+    
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("字体名称", text: $fontName)
+                        .autocapitalization(.none)
+                    
+                    TextField("字体下载链接 (TTF/OTF)", text: $fontURL)
+                        .autocapitalization(.none)
+                        .keyboardType(.URL)
+                } header: {
+                    Text("字体信息")
+                } footer: {
+                    Text("请提供有效的 TTF 或 OTF 字体文件下载链接")
+                }
+                
+                Section("已下载的字体") {
+                    if fontDownloadService.downloadedFonts.isEmpty {
+                        Text("暂无自定义字体")
+                            .foregroundColor(.secondary)
+                    } else {
+                        ForEach(Array(fontDownloadService.downloadedFonts.keys.sorted()), id: \.self) { fontName in
+                            HStack {
+                                Text(fontName)
+                                Spacer()
+                                Button(role: .destructive) {
+                                    fontDownloadService.deleteFont(name: fontName)
+                                } label: {
+                                    Image(systemName: "trash")
+                                        .foregroundColor(.red)
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                Section {
+                    Button {
+                        downloadFont()
+                    } label: {
+                        HStack {
+                            Spacer()
+                            if isDownloading {
+                                ProgressView()
+                                    .padding(.trailing, 8)
+                                Text("下载中...")
+                            } else {
+                                Text("下载字体")
+                            }
+                            Spacer()
+                        }
+                    }
+                    .disabled(fontURL.isEmpty || fontName.isEmpty || isDownloading)
+                }
+            }
+            .navigationTitle("下载字体")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("取消") {
+                        isPresented = false
+                    }
+                }
+            }
+            .alert("下载失败", isPresented: $showError) {
+                Button("确定", role: .cancel) {}
+            } message: {
+                Text(errorMessage)
+            }
+            .onChange(of: fontDownloadService.isDownloading) { _, newValue in
+                isDownloading = newValue
+            }
+            .onChange(of: fontDownloadService.errorMessage) { _, newValue in
+                if let error = newValue {
+                    errorMessage = error
+                    showError = true
+                }
+            }
+        }
+    }
+    
+    private func downloadFont() {
+        isDownloading = true
+        Task {
+            let success = await fontDownloadService.downloadFont(from: fontURL, fontName: fontName)
+            await MainActor.run {
+                isDownloading = false
+                if success {
+                    fontURL = ""
+                    fontName = ""
+                    isPresented = false
+                }
             }
         }
     }
