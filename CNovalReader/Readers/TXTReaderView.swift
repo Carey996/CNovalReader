@@ -9,7 +9,127 @@ struct TXTChapter: Identifiable, Hashable {
     let content: String
 }
 
-// MARK: - TXT 阅读器 (章节滚动版)
+// MARK: - 章节智能检测 (独立函数，可在任何上下文中调用)
+private func detectChaptersFromText(_ text: String, bookTitle: String) -> [TXTChapter] {
+    var detectedChapters: [TXTChapter] = []
+    let lines = text.components(separatedBy: .newlines)
+    
+    let chapterPatterns = [
+        #"^第[零一二三四五六七八九十百千0-9〇○]+章[:：]?\s*(.*)$"#,
+        #"^第[零一二三四五六七八九十百千0-9〇○]+回[:：]?\s*(.*)$"#,
+        #"^第[零一二三四五六七八九十百千0-9〇○]+篇[:：]?\s*(.*)$"#,
+        #"^第[零一二三四五六七八九十百千0-9〇○]+部[:：]?\s*(.*)$"#,
+        #"^卷[零一二三四五六七八九十百千0-9〇○]+[:：]\s*(.*)$"#,
+        #"^(Volume|CHAPTER|Chapter|vol\.)\s*([0-9]+)[:\s]?(.*)$"#,
+        #"^第[零一二三四五六七八九十百千0-9〇○]+节[:：]?\s*(.*)$"#,
+        #"^章节\s*([0-9]+)[:：]?\s*(.*)$"#,
+        #"^\(([0-9]+)\)[:：]?\s*(.*)$"#,
+        #"^【([0-9零一二三四五六七八九十百千]+)】\s*(.*)$"#,
+    ]
+    
+    var compiledPatterns: [NSRegularExpression] = []
+    for pattern in chapterPatterns {
+        if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
+            compiledPatterns.append(regex)
+        }
+    }
+    
+    var currentChapterStart = 0
+    var chapterCounter = 0
+    var pendingChapterTitle: String?
+    
+    for (index, line) in lines.enumerated() {
+        let trimmedLine = line.trimmingCharacters(in: .whitespaces)
+        
+        if trimmedLine.isEmpty {
+            continue
+        }
+        
+        var isChapterTitle = false
+        var chapterTitle = ""
+        
+        for regex in compiledPatterns {
+            let range = NSRange(trimmedLine.startIndex..., in: trimmedLine)
+            if let match = regex.firstMatch(in: trimmedLine, options: [], range: range) {
+                isChapterTitle = true
+                if match.numberOfRanges > 1 {
+                    for groupIndex in 1..<match.numberOfRanges {
+                        if let groupRange = Range(match.range(at: groupIndex), in: trimmedLine) {
+                            let groupValue = String(trimmedLine[groupRange]).trimmingCharacters(in: .whitespaces)
+                            if !groupValue.isEmpty && groupValue.count > chapterTitle.count {
+                                chapterTitle = groupValue
+                            }
+                        }
+                    }
+                }
+                if chapterTitle.isEmpty {
+                    chapterTitle = trimmedLine
+                }
+                break
+            }
+        }
+        
+        if !isChapterTitle {
+            let pureNumberPattern = #"^(\d+)[\.、、]\s*\S"#
+            if let regex = try? NSRegularExpression(pattern: pureNumberPattern, options: []) {
+                let range = NSRange(trimmedLine.startIndex..., in: trimmedLine)
+                if let match = regex.firstMatch(in: trimmedLine, options: [], range: range) {
+                    if index + 1 < lines.count {
+                        let nextLine = lines[index + 1].trimmingCharacters(in: .whitespaces)
+                        if nextLine.isEmpty || nextLine.count < 5 {
+                            continue
+                        }
+                    }
+                    isChapterTitle = true
+                    chapterTitle = trimmedLine
+                }
+            }
+        }
+        
+        if isChapterTitle {
+            if chapterCounter > 0 || !detectedChapters.isEmpty {
+                let endLine = index > 0 ? index - 1 : 0
+                if endLine > currentChapterStart {
+                    let chapterContent = lines[currentChapterStart..<endLine].joined(separator: "\n")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !chapterContent.isEmpty {
+                        let title = pendingChapterTitle ?? "第\(chapterCounter)章"
+                        detectedChapters.append(TXTChapter(
+                            id: "chapter_\(chapterCounter)",
+                            title: title,
+                            startLine: currentChapterStart,
+                            endLine: endLine,
+                            content: chapterContent
+                        ))
+                    }
+                }
+            }
+            
+            currentChapterStart = index
+            chapterCounter += 1
+            pendingChapterTitle = chapterTitle.isEmpty ? "第\(chapterCounter)章" : chapterTitle
+        }
+    }
+    
+    if currentChapterStart < lines.count {
+        let chapterContent = lines[currentChapterStart..<lines.count].joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !chapterContent.isEmpty {
+            let lastTitle = pendingChapterTitle ?? "第\(chapterCounter)章"
+            detectedChapters.append(TXTChapter(
+                id: "chapter_\(chapterCounter)",
+                title: lastTitle,
+                startLine: currentChapterStart,
+                endLine: lines.count,
+                content: chapterContent
+            ))
+        }
+    }
+    
+    return detectedChapters
+}
+
+// MARK: - TXT 阅读器 (章节滚动版 - 异步加载优化)
 struct TXTReaderView: View {
     let book: Book
     @State private var chapters: [TXTChapter] = []
@@ -22,13 +142,22 @@ struct TXTReaderView: View {
     @State private var showChapterList = false
     @State private var scrollProxy: ScrollViewProxy?
     
+    private var chapterNumberDisplay: String {
+        guard !chapters.isEmpty else { return "" }
+        return "第 \(currentChapterIndex + 1) 章 / 共 \(chapters.count) 章"
+    }
+    
+    private var chapterTitleDisplay: String {
+        guard currentChapterIndex < chapters.count else { return "" }
+        return chapters[currentChapterIndex].title
+    }
+    
     var body: some View {
         ZStack {
             (Color(hex: settings.currentBackgroundColor) ?? Color(hex: "#1C1C1E")!)
                 .ignoresSafeArea()
             
             VStack(spacing: 0) {
-                // 顶部工具栏
                 topToolbar
                 
                 if isLoading {
@@ -39,11 +168,10 @@ struct TXTReaderView: View {
                     contentView
                 }
                 
-                // 底部导航栏
                 bottomToolbar
             }
         }
-        .navigationTitle(chapters.isEmpty ? "TXT 阅读器" : (chapters[currentChapterIndex].title))
+        .navigationTitle(chapters.isEmpty ? "TXT 阅读器" : chapterTitleDisplay)
         .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $showSettings) {
             ReaderSettingsView()
@@ -51,8 +179,8 @@ struct TXTReaderView: View {
         .sheet(isPresented: $showChapterList) {
             chapterListSheet
         }
-        .onAppear {
-            loadContent()
+        .task {
+            await loadContentAsync()
         }
         .onDisappear {
             saveReadingPosition()
@@ -62,39 +190,87 @@ struct TXTReaderView: View {
     // MARK: - 顶部工具栏
     
     private var topToolbar: some View {
-        HStack {
-            Button(action: { dismiss() }) {
-                Image(systemName: "chevron.left")
-                    .font(.title3)
-                    .foregroundColor(.blue)
-            }
-            
-            Spacer()
-            
-            if !chapters.isEmpty {
-                Text(chapters[currentChapterIndex].title)
-                    .font(.headline)
-                    .lineLimit(1)
-            }
-            
-            Spacer()
-            
-            HStack(spacing: 16) {
-                Button(action: { showChapterList = true }) {
-                    Image(systemName: "list.bullet")
+        VStack(spacing: 4) {
+            HStack {
+                Button(action: { dismiss() }) {
+                    Image(systemName: "chevron.left")
                         .font(.title3)
                         .foregroundColor(.blue)
                 }
                 
-                Button(action: { showSettings = true }) {
-                    Image(systemName: "textformat.size")
-                        .font(.title3)
-                        .foregroundColor(.blue)
+                Spacer()
+                
+                VStack(spacing: 2) {
+                    Text(book.title)
+                        .font(.headline)
+                        .lineLimit(1)
+                    
+                    if let author = book.author, !author.isEmpty {
+                        Text(author)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                
+                Spacer()
+                
+                HStack(spacing: 16) {
+                    Button(action: { showChapterList = true }) {
+                        Image(systemName: "list.bullet")
+                            .font(.title3)
+                            .foregroundColor(.blue)
+                    }
+                    
+                    Button(action: { showSettings = true }) {
+                        Image(systemName: "textformat.size")
+                            .font(.title3)
+                            .foregroundColor(.blue)
+                    }
                 }
             }
+            
+            HStack(spacing: 12) {
+                if let ext = book.fileExtension?.uppercased() {
+                    metadataTag(ext)
+                }
+                
+                if let fileSize = book.fileSize {
+                    metadataTag(formatFileSize(fileSize))
+                }
+                
+                metadataTag(book.createdAt.formatted(date: .abbreviated, time: .omitted))
+                
+                if let total = book.totalPages, total > 0 {
+                    metadataTag("第\(currentChapterIndex + 1)/\(total)章")
+                }
+                
+                if let position = book.readingPosition {
+                    metadataTag("\(Int(position * 100))%")
+                }
+                
+                if let remoteURL = book.remoteURL, !remoteURL.isEmpty {
+                    if let host = URL(string: remoteURL)?.host {
+                        metadataTag(host)
+                    }
+                }
+                
+                Spacer()
+            }
+            .padding(.horizontal, 4)
         }
         .padding()
         .background(Color(hex: settings.currentBackgroundColor) ?? Color(hex: "#1C1C1E")!)
+    }
+    
+    private func metadataTag(_ text: String) -> some View {
+        Text(text)
+            .font(.caption2)
+            .foregroundColor(Color(hex: settings.currentTextColor)?.opacity(0.6) ?? .gray)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Color.gray.opacity(0.2))
+            .cornerRadius(4)
     }
     
     // MARK: - 内容视图
@@ -105,7 +281,6 @@ struct TXTReaderView: View {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(chapters.enumerated()), id: \.element.id) { index, chapter in
                         VStack(alignment: .leading, spacing: 8) {
-                            // 章节标题
                             Text(chapter.title)
                                 .font(.title2)
                                 .fontWeight(.bold)
@@ -114,7 +289,6 @@ struct TXTReaderView: View {
                                 .padding(.bottom, 12)
                                 .id(chapter.id)
                             
-                            // 章节内容
                             Text(chapter.content)
                                 .font(.system(size: settings.fontSize))
                                 .foregroundColor(Color(hex: settings.currentTextColor) ?? .white)
@@ -131,15 +305,14 @@ struct TXTReaderView: View {
                 self.scrollProxy = proxy
             }
             .onChange(of: currentChapterIndex) { _, newIndex in
+                guard newIndex < chapters.count else { return }
                 withAnimation(.easeInOut(duration: 0.3)) {
-                    scrollProxy?.scrollTo(chapters[newIndex].id, anchor: .top)
+                    proxy.scrollTo(chapters[newIndex].id, anchor: .top)
                 }
             }
         }
         .background(Color(hex: settings.currentBackgroundColor) ?? Color(hex: "#1C1C1E")!)
     }
-    
-    // MARK: - 加载视图
     
     private var loadingView: some View {
         VStack(spacing: 16) {
@@ -151,8 +324,6 @@ struct TXTReaderView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
-    
-    // MARK: - 错误视图
     
     private func errorView(_ message: String) -> some View {
         VStack(spacing: 16) {
@@ -170,7 +341,7 @@ struct TXTReaderView: View {
                 .padding(.horizontal, 32)
             
             Button("重试") {
-                loadContent()
+                Task { await loadContentAsync() }
             }
             .buttonStyle(.borderedProminent)
         }
@@ -182,12 +353,23 @@ struct TXTReaderView: View {
     private var bottomToolbar: some View {
         VStack(spacing: 8) {
             if !chapters.isEmpty {
-                Text("第 \(currentChapterIndex + 1) 章 / 共 \(chapters.count) 章")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                GeometryReader { geometry in
+                    ZStack(alignment: .leading) {
+                        Rectangle()
+                            .fill(Color.gray.opacity(0.3))
+                            .frame(height: 4)
+                        
+                        Rectangle()
+                            .fill(Color.blue)
+                            .frame(width: geometry.size.width * progressPercentage, height: 4)
+                    }
+                    .cornerRadius(2)
+                }
+                .frame(height: 4)
+                .padding(.horizontal)
             }
             
-            HStack(spacing: 32) {
+            HStack {
                 Button(action: previousChapter) {
                     HStack(spacing: 4) {
                         Image(systemName: "chevron.left")
@@ -196,6 +378,16 @@ struct TXTReaderView: View {
                 }
                 .disabled(currentChapterIndex <= 0)
                 .buttonStyle(.bordered)
+                
+                Spacer()
+                
+                if !chapters.isEmpty {
+                    Text(chapterNumberDisplay)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                
+                Spacer()
                 
                 Button(action: nextChapter) {
                     HStack(spacing: 4) {
@@ -209,6 +401,11 @@ struct TXTReaderView: View {
         }
         .padding()
         .background(Color(hex: settings.currentBackgroundColor) ?? Color(hex: "#1C1C1E")!)
+    }
+    
+    private var progressPercentage: Double {
+        guard !chapters.isEmpty else { return 0 }
+        return Double(currentChapterIndex + 1) / Double(chapters.count)
     }
     
     // MARK: - 章节列表
@@ -251,9 +448,9 @@ struct TXTReaderView: View {
         .presentationDetents([.medium, .large])
     }
     
-    // MARK: - 内容加载
+    // MARK: - 异步内容加载 (优化版 - 不卡 UI)
     
-    private func loadContent() {
+    private func loadContentAsync() async {
         isLoading = true
         errorMessage = nil
         
@@ -266,239 +463,167 @@ struct TXTReaderView: View {
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         let bookPath = documentsPath.appendingPathComponent("Books").appendingPathComponent(fileName)
         
-        guard let data = try? Data(contentsOf: bookPath) else {
-            errorMessage = "无法读取文件"
+        // 先尝试从 Book 模型恢复章节信息（快速路径）
+        let savedChapters = loadPersistedChapters()
+        
+        if let persisted = savedChapters, !persisted.isEmpty {
+            // 有缓存的章节，快速显示 UI
             isLoading = false
-            return
-        }
-        
-        // 编码检测
-        var content: String?
-        
-        // 1. 优先使用 NSString 智能检测编码
-        var convertedString: NSString?
-        var usedLossy: ObjCBool = false
-        let detectedEncoding = NSString.stringEncoding(
-            for: data,
-            encodingOptions: [:],
-            convertedString: &convertedString,
-            usedLossyConversion: &usedLossy
-        )
-        if detectedEncoding != 0, let str = convertedString {
-            content = str as String
-        }
-        
-        // 2. Fallback：常用编码列表
-        if content == nil {
-            let fallbackEncodings: [UInt] = [0x6581, 4, 0x80000003, 0x80000431, 6, 5, 0x80000421]
-            for encodingRaw in fallbackEncodings {
-                let encoding = String.Encoding(rawValue: encodingRaw)
-                if let str = String(data: data, encoding: encoding), !str.isEmpty {
-                    content = str
-                    break
-                }
+            
+            if book.currentChapterIndex > 0 && book.currentChapterIndex < persisted.count {
+                currentChapterIndex = book.currentChapterIndex
             }
-        }
-        
-        guard let text = content else {
-            errorMessage = "不支持的文件编码"
-            isLoading = false
+            
+            // 后台加载完整内容和章节详情
+            Task.detached(priority: .userInitiated) { [bookPath, persisted, bookID = book.id] in
+                await self.loadChaptersWithContent(bookPath: bookPath, persistedChapters: persisted, bookID: bookID)
+            }
             return
         }
         
-        // 章节拆分
-        chapters = detectChapters(from: text)
-        
-        // 如果没有识别到章节，创建整本书作为一个章节
-        if chapters.isEmpty {
-            chapters = [TXTChapter(
-                id: "chapter_0",
-                title: book.title,
-                startLine: 0,
-                endLine: text.components(separatedBy: .newlines).count,
-                content: text
-            )]
-        }
-        
-        // 恢复阅读位置
-        if let savedChapter = book.currentPage, savedChapter > 0, savedChapter < chapters.count {
-            currentChapterIndex = savedChapter
-        }
-        
-        isLoading = false
+        // 无缓存，需要完整解析
+        await parseAndLoadContent(bookPath: bookPath)
     }
     
-    // MARK: - 章节智能检测
-    
-    private func detectChapters(from text: String) -> [TXTChapter] {
-        var detectedChapters: [TXTChapter] = []
-        let lines = text.components(separatedBy: .newlines)
-        
-        // 章节标题匹配模式 - 扩展的中文网络小说模式
-        let chapterPatterns = [
-            // 标准中文章节格式：第X章
-            #"^第[零一二三四五六七八九十百千0-9〇○]+章[:：]?\s*(.*)$"#,
-            // 第X回 (古风小说)
-            #"^第[零一二三四五六七八九十百千0-9〇○]+回[:：]?\s*(.*)$"#,
-            // 第X篇 / 第X部
-            #"^第[零一二三四五六七八九十百千0-9〇○]+篇[:：]?\s*(.*)$"#,
-            #"^第[零一二三四五六七八九十百千0-9〇○]+部[:：]?\s*(.*)$"#,
-            // 卷X：标题 格式
-            #"^卷[零一二三四五六七八九十百千0-9〇○]+[:：]\s*(.*)$"#,
-            // Volume X / CHAPTER X (英文)
-            #"^(Volume|CHAPTER|Chapter|vol\\.)\\s*([0-9]+)[:\\s]?(.*)$"#,
-            // 第X节 / 第X小节
-            #"^第[零一二三四五六七八九十百千0-9〇○]+节[:：]?\s*(.*)$"#,
-            // 章节 标题 格式
-            #"^章节\\s*([0-9]+)[:：]?\\s*(.*)$"#,
-            // (X) 格式
-            #"^\\(([0-9]+)\\)[:：]?\\s*(.*)$"#,
-            // 【X】标题 格式
-            #"^【([0-9零一二三四五六七八九十百千]+)】\\s*(.*)$"#,
-        ]
-        
-        var compiledPatterns: [NSRegularExpression] = []
-        for pattern in chapterPatterns {
-            if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
-                compiledPatterns.append(regex)
-            }
-        }
-        
-        var currentChapterStart = 0
-        var chapterCounter = 0
-        var pendingChapterTitle: String?
-        
-        for (index, line) in lines.enumerated() {
-            let trimmedLine = line.trimmingCharacters(in: .whitespaces)
+    @MainActor
+    private func loadChaptersWithContent(bookPath: URL, persistedChapters: [PersistedChapterInfo], bookID: UUID) async {
+        do {
+            let data = try Data(contentsOf: bookPath)
             
-            // 跳过空行（但记录前一个章节的结束）
-            if trimmedLine.isEmpty {
-                continue
+            var content: String?
+            var convertedString: NSString?
+            var usedLossy: ObjCBool = false
+            let detectedEncoding = NSString.stringEncoding(
+                for: data,
+                encodingOptions: [:],
+                convertedString: &convertedString,
+                usedLossyConversion: &usedLossy
+            )
+            if detectedEncoding != 0, let str = convertedString {
+                content = str as String
             }
             
-            // 检查是否匹配章节标题模式
-            var isChapterTitle = false
-            var chapterTitle = ""
-            var chapterNumber = ""
-            
-            for regex in compiledPatterns {
-                let range = NSRange(trimmedLine.startIndex..., in: trimmedLine)
-                if let match = regex.firstMatch(in: trimmedLine, options: [], range: range) {
-                    isChapterTitle = true
-                    // 尝试提取标题（从捕获组）
-                    if match.numberOfRanges > 1 {
-                        // 尝试多个可能的捕获组
-                        for groupIndex in 1..<match.numberOfRanges {
-                            if let groupRange = Range(match.range(at: groupIndex), in: trimmedLine) {
-                                let groupValue = String(trimmedLine[groupRange]).trimmingCharacters(in: .whitespaces)
-                                if !groupValue.isEmpty && groupValue.count > chapterNumber.count {
-                                    chapterTitle = groupValue
-                                }
-                            }
-                        }
-                    }
-                    if chapterTitle.isEmpty {
-                        chapterTitle = trimmedLine
-                    }
-                    break
-                }
-            }
-            
-            // 纯数字 "1." "2." 等也可能是章节标题
-            if !isChapterTitle {
-                let pureNumberPattern = #"^(\d+)[\.、、]\s*\S"#
-                if let regex = try? NSRegularExpression(pattern: pureNumberPattern, options: []) {
-                    let range = NSRange(trimmedLine.startIndex..., in: trimmedLine)
-                    if let match = regex.firstMatch(in: trimmedLine, options: [], range: range) {
-                        // 检查是否是章节号（后面跟着非特殊字符的内容）
-                        if index + 1 < lines.count {
-                            let nextLine = lines[index + 1].trimmingCharacters(in: .whitespaces)
-                            // 如果下一行是空行或很短，可能是正文开始
-                            if nextLine.isEmpty || nextLine.count < 5 {
-                                continue
-                            }
-                        }
-                        isChapterTitle = true
-                        chapterTitle = trimmedLine
+            if content == nil {
+                let fallbackEncodings: [UInt] = [0x6581, 4, 0x80000003, 0x80000431, 6, 5, 0x80000421]
+                for encodingRaw in fallbackEncodings {
+                    let encoding = String.Encoding(rawValue: encodingRaw)
+                    if let str = String(data: data, encoding: encoding), !str.isEmpty {
+                        content = str
+                        break
                     }
                 }
             }
             
-            // 检测到章节标题
-            if isChapterTitle {
-                // 保存上一个章节
-                if chapterCounter > 0 || !detectedChapters.isEmpty {
-                    let endLine = index > 0 ? index - 1 : 0
-                    if endLine > currentChapterStart {
-                        let chapterContent = lines[currentChapterStart..<endLine].joined(separator: "\n")
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !chapterContent.isEmpty {
-                            let title = pendingChapterTitle ?? "第\(chapterCounter)章"
-                            detectedChapters.append(TXTChapter(
-                                id: "chapter_\(chapterCounter)",
-                                title: title,
-                                startLine: currentChapterStart,
-                                endLine: endLine,
-                                content: chapterContent
-                            ))
-                        }
-                    }
-                }
-                
-                // 开始新章节
-                currentChapterStart = index
-                chapterCounter += 1
-                pendingChapterTitle = chapterTitle.isEmpty ? "第\(chapterCounter)章" : chapterTitle
-            } else {
-                // 非章节标题行
-                // 如果还没有检测到任何章节，继续累积
-                if detectedChapters.isEmpty && chapterCounter == 0 {
-                    // 检查是否应该开始新章节（累积了足够多的非空行后出现的新行可能是章节标题）
-                    // 这种情况较少见，暂时不处理
-                }
-            }
-        }
-        
-        // 添加最后一个章节
-        if currentChapterStart < lines.count {
-            let chapterContent = lines[currentChapterStart..<lines.count].joined(separator: "\n")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !chapterContent.isEmpty {
-                let lastTitle = pendingChapterTitle ?? "第\(chapterCounter)章"
-                detectedChapters.append(TXTChapter(
-                    id: "chapter_\(chapterCounter)",
-                    title: lastTitle,
-                    startLine: currentChapterStart,
-                    endLine: lines.count,
+            guard let text = content else { return }
+            
+            let lines = text.components(separatedBy: .newlines)
+            
+            let rebuiltChapters = persistedChapters.map { persisted -> TXTChapter in
+                let endLine = min(persisted.endLine, lines.count)
+                let startLine = min(persisted.startLine, endLine)
+                let chapterContent = lines[startLine..<endLine].joined(separator: "\n")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return TXTChapter(
+                    id: persisted.id,
+                    title: persisted.title,
+                    startLine: persisted.startLine,
+                    endLine: persisted.endLine,
                     content: chapterContent
-                ))
+                )
             }
+            
+            self.chapters = rebuiltChapters
+            
+        } catch {
+            // 如果恢复失败，重新完整解析
+            await parseAndLoadContent(bookPath: bookPath)
         }
+    }
+    
+    private func parseAndLoadContent(bookPath: URL) async {
+        isLoading = true
         
-        // 如果没有检测到章节，使用默认章节（整本书为一个章节）
-        if detectedChapters.isEmpty && !lines.isEmpty {
-            detectedChapters = [TXTChapter(
-                id: "chapter_0",
-                title: book.title,
-                startLine: 0,
-                endLine: lines.count,
-                content: text
-            )]
+        do {
+            let data = try Data(contentsOf: bookPath)
+            
+            var content: String?
+            var convertedString: NSString?
+            var usedLossy: ObjCBool = false
+            let detectedEncoding = NSString.stringEncoding(
+                for: data,
+                encodingOptions: [:],
+                convertedString: &convertedString,
+                usedLossyConversion: &usedLossy
+            )
+            if detectedEncoding != 0, let str = convertedString {
+                content = str as String
+            }
+            
+            if content == nil {
+                let fallbackEncodings: [UInt] = [0x6581, 4, 0x80000003, 0x80000431, 6, 5, 0x80000421]
+                for encodingRaw in fallbackEncodings {
+                    let encoding = String.Encoding(rawValue: encodingRaw)
+                    if let str = String(data: data, encoding: encoding), !str.isEmpty {
+                        content = str
+                        break
+                    }
+                }
+            }
+            
+            guard let text = content else {
+                errorMessage = "不支持的文件编码"
+                isLoading = false
+                return
+            }
+            
+            let bookTitle = book.title
+            
+            let parsedChapters = detectChaptersFromText(text, bookTitle: bookTitle)
+            
+            var finalChapters = parsedChapters
+            if finalChapters.isEmpty {
+                finalChapters = [TXTChapter(
+                    id: "chapter_0",
+                    title: bookTitle,
+                    startLine: 0,
+                    endLine: text.components(separatedBy: .newlines).count,
+                    content: text
+                )]
+            }
+            
+            persistChapters(finalChapters)
+            
+            if book.currentChapterIndex > 0 && book.currentChapterIndex < finalChapters.count {
+                currentChapterIndex = book.currentChapterIndex
+            }
+            
+            chapters = finalChapters
+            isLoading = false
+            
+        } catch {
+            errorMessage = "无法读取文件: \(error.localizedDescription)"
+            isLoading = false
         }
-        
-        // 重新分配 ID 使其与索引对应（确保 ID 唯一）
-        var finalChapters: [TXTChapter] = []
-        for (index, chapter) in detectedChapters.enumerated() {
-            finalChapters.append(TXTChapter(
-                id: "chapter_\(index)",
-                title: chapter.title,
-                startLine: chapter.startLine,
-                endLine: chapter.endLine,
-                content: chapter.content
-            ))
+    }
+    
+    // MARK: - 章节持久化
+    
+    private func persistChapters(_ chapters: [TXTChapter]) {
+        let persisted = chapters.map {
+            PersistedChapterInfo(id: $0.id, title: $0.title, startLine: $0.startLine, endLine: $0.endLine)
         }
-        
-        return finalChapters
+        if let data = try? JSONEncoder().encode(persisted) {
+            book.chaptersData = data
+        }
+    }
+    
+    private func loadPersistedChapters() -> [PersistedChapterInfo]? {
+        guard let data = book.chaptersData,
+              let chapters = try? JSONDecoder().decode([PersistedChapterInfo].self, from: data),
+              !chapters.isEmpty else {
+            return nil
+        }
+        return chapters
     }
     
     // MARK: - 翻页控制
@@ -516,11 +641,23 @@ struct TXTReaderView: View {
     // MARK: - 阅读进度
     
     private func saveReadingPosition() {
-        book.currentPage = currentChapterIndex
+        book.currentChapterIndex = currentChapterIndex
         book.totalPages = chapters.count
         book.lastReadAt = Date()
-        if let total = book.totalPages, total > 0 {
-            book.readingPosition = Double(currentChapterIndex) / Double(total)
+        if !chapters.isEmpty {
+            book.currentPage = currentChapterIndex
+            book.readingPosition = Double(currentChapterIndex + 1) / Double(chapters.count)
+            if currentChapterIndex < chapters.count {
+                book.currentChapterTitle = chapters[currentChapterIndex].title
+            }
         }
+    }
+    
+    // MARK: - 辅助方法
+    
+    private func formatFileSize(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
     }
 }

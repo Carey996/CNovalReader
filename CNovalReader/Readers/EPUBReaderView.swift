@@ -17,6 +17,17 @@ struct EPUBReaderView: View {
     
     private let parsingService = EPUBParsingService()
     
+    // MARK: - 章节编号显示
+    private var chapterNumberDisplay: String {
+        guard let chapters = epubBook?.chapters, !chapters.isEmpty else { return "" }
+        return "第 \(currentChapterIndex + 1) 章 / 共 \(chapters.count) 章"
+    }
+    
+    private var progressPercentage: Double {
+        guard let chapters = epubBook?.chapters, !chapters.isEmpty else { return 0 }
+        return Double(currentChapterIndex + 1) / Double(chapters.count)
+    }
+    
     var body: some View {
         ZStack {
             (Color(hex: settings.currentBackgroundColor) ?? Color(hex: "#1C1C1E")!)
@@ -46,57 +57,104 @@ struct EPUBReaderView: View {
         .sheet(isPresented: $showSettings) {
             ReaderSettingsView()
         }
-        .onAppear {
-            Task { await loadContent() }
+        .task {
+            await loadContent()
         }
         .onDisappear {
             saveReadingPosition()
         }
     }
     
-    // MARK: - 顶部工具栏
+    // MARK: - 顶部工具栏 - 显示完整元数据
     
     private var topToolbar: some View {
-        HStack {
-            Button(action: { dismiss() }) {
-                Image(systemName: "chevron.left")
-                    .font(.title3)
-                    .foregroundColor(.blue)
-            }
-            
-            Spacer()
-            
-            VStack(spacing: 2) {
-                Text(epubBook?.title ?? "加载中...")
-                    .font(.headline)
-                    .lineLimit(1)
+        VStack(spacing: 4) {
+            HStack {
+                Button(action: { dismiss() }) {
+                    Image(systemName: "chevron.left")
+                        .font(.title3)
+                        .foregroundColor(.blue)
+                }
                 
-                if let author = epubBook?.author, author != "Unknown" {
-                    Text(author)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                Spacer()
+                
+                VStack(spacing: 2) {
+                    Text(epubBook?.title ?? book.title)
+                        .font(.headline)
                         .lineLimit(1)
-                }
-            }
-            
-            Spacer()
-            
-            HStack(spacing: 16) {
-                Button(action: { showSettings = true }) {
-                    Image(systemName: "textformat.size")
-                        .font(.title3)
-                        .foregroundColor(.blue)
+                    
+                    if let author = epubBook?.author, author != "Unknown", !author.isEmpty {
+                        Text(author)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    } else if let author = book.author, !author.isEmpty {
+                        Text(author)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
                 }
                 
-                Button(action: { showChapterList = true }) {
-                    Image(systemName: "list.bullet")
-                        .font(.title3)
-                        .foregroundColor(.blue)
+                Spacer()
+                
+                HStack(spacing: 16) {
+                    Button(action: { showSettings = true }) {
+                        Image(systemName: "textformat.size")
+                            .font(.title3)
+                            .foregroundColor(.blue)
+                    }
+                    
+                    Button(action: { showChapterList = true }) {
+                        Image(systemName: "list.bullet")
+                            .font(.title3)
+                            .foregroundColor(.blue)
+                    }
                 }
             }
+            
+            // 元数据行
+            HStack(spacing: 12) {
+                if let ext = book.fileExtension?.uppercased() {
+                    metadataTag(ext)
+                }
+                
+                if let fileSize = book.fileSize {
+                    metadataTag(formatFileSize(fileSize))
+                }
+                
+                metadataTag(book.createdAt.formatted(date: .abbreviated, time: .omitted))
+                
+                if let chapters = epubBook?.chapters, !chapters.isEmpty {
+                    metadataTag("第\(currentChapterIndex + 1)/\(chapters.count)章")
+                }
+                
+                if let position = book.readingPosition {
+                    metadataTag("\(Int(position * 100))%")
+                }
+                
+                if let remoteURL = book.remoteURL, !remoteURL.isEmpty {
+                    if let host = URL(string: remoteURL)?.host {
+                        metadataTag(host)
+                    }
+                }
+                
+                Spacer()
+            }
+            .padding(.horizontal, 4)
         }
         .padding()
         .background(Color(hex: settings.currentBackgroundColor) ?? Color(hex: "#1C1C1E")!)
+    }
+    
+    private func metadataTag(_ text: String) -> some View {
+        Text(text)
+            .font(.caption2)
+            .foregroundColor(Color(hex: settings.currentTextColor)?.opacity(0.6) ?? .gray)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Color.gray.opacity(0.2))
+            .cornerRadius(4)
     }
     
     // MARK: - 内容视图
@@ -105,7 +163,8 @@ struct EPUBReaderView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
-                    if let chapter = epubBook?.chapters[currentChapterIndex] {
+                    if let chapters = epubBook?.chapters, currentChapterIndex < chapters.count {
+                        let chapter = chapters[currentChapterIndex]
                         VStack(alignment: .leading, spacing: 8) {
                             Text(chapter.title)
                                 .font(.title2)
@@ -180,10 +239,22 @@ struct EPUBReaderView: View {
     
     private var bottomToolbar: some View {
         VStack(spacing: 8) {
+            // 进度条
             if let chapters = epubBook?.chapters, !chapters.isEmpty {
-                Text("第 \(currentChapterIndex + 1) 章 / 共 \(chapters.count) 章")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                GeometryReader { geometry in
+                    ZStack(alignment: .leading) {
+                        Rectangle()
+                            .fill(Color.gray.opacity(0.3))
+                            .frame(height: 4)
+                        
+                        Rectangle()
+                            .fill(Color.blue)
+                            .frame(width: geometry.size.width * progressPercentage, height: 4)
+                    }
+                    .cornerRadius(2)
+                }
+                .frame(height: 4)
+                .padding(.horizontal)
             }
             
             HStack(spacing: 32) {
@@ -195,6 +266,16 @@ struct EPUBReaderView: View {
                 }
                 .disabled(currentChapterIndex <= 0)
                 .buttonStyle(.bordered)
+                
+                Spacer()
+                
+                if let chapters = epubBook?.chapters, !chapters.isEmpty {
+                    Text(chapterNumberDisplay)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                
+                Spacer()
                 
                 Button(action: nextChapter) {
                     HStack(spacing: 4) {
@@ -270,10 +351,12 @@ struct EPUBReaderView: View {
             isLoading = false
             showContent = true
             
-            // 恢复阅读位置
-            restoreReadingPosition()
+            // 恢复阅读位置 - 使用 currentChapterIndex 字段
+            if book.currentChapterIndex > 0 && book.currentChapterIndex < cached.chapters.count {
+                currentChapterIndex = book.currentChapterIndex
+            }
             
-            // 后台加载章节内容
+            // 立即加载当前章节
             await loadChapter(currentChapterIndex)
             return
         }
@@ -281,12 +364,14 @@ struct EPUBReaderView: View {
         do {
             epubBook = try await parsingService.parse(fileURL: bookPath)
             
-            if let book = epubBook, !book.chapters.isEmpty {
+            if let parsedBook = epubBook, !parsedBook.chapters.isEmpty {
                 isLoading = false
                 showContent = true
                 
-                // 恢复阅读位置
-                restoreReadingPosition()
+                // 恢复阅读位置 - 使用 Book 模型的 currentChapterIndex
+                if book.currentChapterIndex > 0 && book.currentChapterIndex < parsedBook.chapters.count {
+                    currentChapterIndex = book.currentChapterIndex
+                }
                 
                 // 立即加载当前章节
                 await loadChapter(currentChapterIndex)
@@ -301,7 +386,7 @@ struct EPUBReaderView: View {
     }
     
     private func loadChapter(_ index: Int) async {
-        guard let epub = epubBook else { return }
+        guard let epub = epubBook, index < epub.chapters.count else { return }
         
         do {
             chapterContent = try await parsingService.extractChapterContent(book: epub, chapterIndex: index)
@@ -315,12 +400,16 @@ struct EPUBReaderView: View {
     
     private func previousChapter() {
         guard currentChapterIndex > 0 else { return }
-        Task { await loadChapter(currentChapterIndex - 1) }
+        Task {
+            await loadChapter(currentChapterIndex - 1)
+        }
     }
     
     private func nextChapter() {
         guard let chapters = epubBook?.chapters, currentChapterIndex < chapters.count - 1 else { return }
-        Task { await loadChapter(currentChapterIndex + 1) }
+        Task {
+            await loadChapter(currentChapterIndex + 1)
+        }
     }
     
     // MARK: - 阅读进度
@@ -330,13 +419,20 @@ struct EPUBReaderView: View {
         book.totalPages = epubBook?.chapters.count
         book.lastReadAt = Date()
         if let total = book.totalPages, total > 0 {
-            book.readingPosition = Double(currentChapterIndex) / Double(total)
+            book.readingPosition = Double(currentChapterIndex + 1) / Double(total)
+        }
+        // 持久化章节索引
+        book.currentChapterIndex = currentChapterIndex
+        if let chapters = epubBook?.chapters, currentChapterIndex < chapters.count {
+            book.currentChapterTitle = chapters[currentChapterIndex].title
         }
     }
     
-    private func restoreReadingPosition() {
-        if let savedChapter = book.currentPage, savedChapter > 0 {
-            currentChapterIndex = savedChapter
-        }
+    // MARK: - 辅助方法
+    
+    private func formatFileSize(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
     }
 }

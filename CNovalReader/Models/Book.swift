@@ -28,6 +28,11 @@ final class Book {
     var totalPages: Int?
     var readingPosition: Double?
 
+    // MARK: - 章节状态持久化 (TXT)
+    var currentChapterIndex: Int
+    var currentChapterTitle: String?
+    var chaptersData: Data? // 序列化的章节信息
+
     // MARK: - 元数据
     var bookDescription: String?
     var coverImageData: Data?
@@ -60,7 +65,25 @@ final class Book {
         self.downloadProgress = 0
         self.createdAt = Date()
         self.updatedAt = Date()
-        self.status = .unknown
+        self.statusRawValue = nil
+        self.currentChapterIndex = 0
+        self.currentChapterTitle = nil
+        self.chaptersData = nil
+    }
+}
+
+// MARK: - 章节信息 (可序列化)
+struct PersistedChapterInfo: Codable, Identifiable {
+    let id: String
+    let title: String
+    let startLine: Int
+    let endLine: Int
+
+    init(id: String, title: String, startLine: Int, endLine: Int) {
+        self.id = id
+        self.title = title
+        self.startLine = startLine
+        self.endLine = endLine
     }
 }
 

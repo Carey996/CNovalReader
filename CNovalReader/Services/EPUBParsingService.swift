@@ -146,7 +146,7 @@ actor EPUBParsingService {
         return epubBook
     }
     
-    // MARK: - ZIP 解压 (使用 ZIPFoundation)
+    // MARK: - ZIP 解压 (使用 ZIPFoundation - 手动提取每个条目以获得更好的错误处理)
     
     private func extractZIP(from sourceURL: URL, to destinationURL: URL) async throws {
         let fileManager = FileManager.default
@@ -154,11 +154,51 @@ actor EPUBParsingService {
         // 确保目标目录存在
         try fileManager.createDirectory(at: destinationURL, withIntermediateDirectories: true)
         
-        // 使用 ZIPFoundation 解压
-        do {
-            try fileManager.unzipItem(at: sourceURL, to: destinationURL)
-        } catch {
-            throw EPUBError.extractionFailed(error.localizedDescription)
+        // 使用 ZIPFoundation 的 Archive API 进行更精细的控制
+        guard let archive = Archive(url: sourceURL, accessMode: .read) else {
+            throw EPUBError.extractionFailed("无法打开 EPUB 文件作为 ZIP 归档")
+        }
+        
+        var entries: [(path: String, data: Data)] = []
+        
+        // 先收集所有条目，避免在遍历时修改 archive
+        for entry in archive {
+            entries.append((entry.path, Data()))
+        }
+        
+        // 提取每个条目
+        for (path, _) in entries {
+            let entryPath = destinationURL.appendingPathComponent(path)
+            let parentDir = entryPath.deletingLastPathComponent()
+            
+            // 确保父目录存在
+            if !fileManager.fileExists(atPath: parentDir.path) {
+                try fileManager.createDirectory(at: parentDir, withIntermediateDirectories: true)
+            }
+            
+            // 判断是文件还是目录
+            if path.hasSuffix("/") {
+                // 目录，创建它
+                try fileManager.createDirectory(at: entryPath, withIntermediateDirectories: true)
+            } else {
+                // 文件，提取内容
+                // 先通过路径查找 Entry 对象
+                guard let zipEntry = archive[path] else {
+                    throw EPUBError.extractionFailed("无法找到归档中的文件: \(path)")
+                }
+                
+                do {
+                    _ = try archive.extract(zipEntry, to: entryPath)
+                } catch {
+                    // 如果直接提取失败，尝试用 Data 方式提取
+                    var extractedData = Data()
+                    _ = try archive.extract(zipEntry) { data in
+                        extractedData.append(data)
+                        return ()
+                    }
+                    try extractedData.write(to: entryPath)
+                }
+            }
         }
     }
     
