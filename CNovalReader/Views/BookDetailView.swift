@@ -192,54 +192,50 @@ struct BookDetailView: View {
     }
 }
 
-// MARK: - 阅读器视图占位符
+// MARK: - 阅读器视图
 
 @available(iOS 17.0, *)
 struct ReaderView: View {
     let book: Book
     @Environment(\.dismiss) private var dismiss
-
+    
     var body: some View {
-        NavigationStack {
-            VStack {
-                Text("Reader for")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-
-                Text(book.title)
-                    .font(.title2)
-                    .fontWeight(.bold)
-                    .multilineTextAlignment(.center)
-
-                Spacer()
-
-                if let fileName = book.localFileName {
-                    let url = FileManagerService.shared.localFileURL(for: fileName)
-                    if let url = url {
-                        Text("File: \(url.lastPathComponent)")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-
-                        Text("Reader implementation coming soon...")
-                            .font(.callout)
-                            .foregroundColor(.secondary)
-                            .padding()
-                    }
-                }
-
-                Spacer()
-            }
-            .padding()
-            .navigationTitle("Reading")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Close") {
-                        dismiss()
-                    }
-                }
+        Group {
+            switch book.fileExtension?.lowercased() {
+            case "txt":
+                TXTReaderView(book: book)
+            case "epub":
+                EPUBReaderView(book: book)
+            case "pdf":
+                PDFReaderView(book: book)
+            default:
+                unsupportedFormatView
             }
         }
+    }
+    
+    private var unsupportedFormatView: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 50))
+                .foregroundColor(.orange)
+            
+            Text("Unsupported Format")
+                .font(.title2)
+                .fontWeight(.bold)
+            
+            Text("'\(book.fileExtension ?? "unknown")' is not supported.")
+                .font(.body)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
+            
+            Button("Close") {
+                dismiss()
+            }
+            .padding(.top, 20)
+        }
+        .padding()
     }
 }
 
