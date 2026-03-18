@@ -330,6 +330,10 @@ struct ContentView: View {
     @State private var showSettings = false
     @State private var selectedTab = 0
     @State private var selectedCategory: String? = nil
+    @State private var showFileImporter = false
+    @State private var isImporting = false
+    @State private var importError: String?
+    @State private var showImportError = false
 
     // MARK: - 计算属性：所有分类
     private var allCategories: [String] {
@@ -389,7 +393,11 @@ struct ContentView: View {
                                 .foregroundColor(BookshelfTheme.shelfDark)
                         }
                     }
-                    ToolbarItem(placement: .topBarTrailing) {
+                    ToolbarItemGroup(placement: .topBarTrailing) {
+                        Button { showFileImporter = true } label: {
+                            Image(systemName: "doc.badge.plus")
+                                .foregroundColor(BookshelfTheme.shelfDark)
+                        }
                         Button { showDownloadSheet = true } label: {
                             Image(systemName: "plus")
                                 .foregroundColor(BookshelfTheme.shelfDark)
@@ -426,6 +434,37 @@ struct ContentView: View {
         .tint(BookshelfTheme.accentGold)
         .sheet(isPresented: $showDownloadSheet) { DownloadView() }
         .sheet(isPresented: $showSettings) { ReaderSettingsView() }
+        .fileImporter(
+            isPresented: $showFileImporter,
+            allowedContentTypes: [.plainText, .pdf, .epub],
+            allowsMultipleSelection: false
+        ) { result in
+            handleFileImport(result)
+        }
+        .alert("导入失败", isPresented: $showImportError) {
+            Button("确定") {}
+        } message: {
+            Text(importError ?? "未知错误")
+        }
+        .overlay {
+            if isImporting {
+                ZStack {
+                    Color.black.opacity(0.4)
+                        .ignoresSafeArea()
+                    VStack(spacing: 16) {
+                        ProgressView()
+                            .scaleEffect(1.5)
+                            .tint(.white)
+                        Text("正在导入书籍...")
+                            .font(.headline)
+                            .foregroundColor(.white)
+                    }
+                    .padding(32)
+                    .background(Color(.systemGray5).opacity(0.9))
+                    .cornerRadius(16)
+                }
+            }
+        }
     }
 
     // MARK: - 空状态
@@ -488,6 +527,11 @@ struct ContentView: View {
                     .font(.headline)
                     .foregroundColor(BookshelfTheme.shelfDark)
                 Spacer()
+                if todayReadingMinutes > 0 {
+                    Text("今日阅读 \(todayReadingMinutes)m")
+                        .font(.caption)
+                        .foregroundColor(BookshelfTheme.accentGold)
+                }
             }
             .padding(.horizontal, 16)
             .padding(.top, 16)
@@ -517,6 +561,78 @@ struct ContentView: View {
                 .padding(.bottom, 12)
             }
         }
+    }
+
+    // MARK: - 今日阅读分钟数
+    private var todayReadingMinutes: Int {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let recentBooksWithReadingToday = recentBooks.filter { book in
+            guard let lastReading = book.lastReadingTime else { return false }
+            return calendar.isDate(lastReading, inSameDayAs: today)
+        }
+        let totalSeconds = recentBooksWithReadingToday.reduce(0) { $0 + $1.totalReadingTime }
+        return max(1, Int(totalSeconds / 60))
+    }
+
+    // MARK: - 文件导入处理
+    private func handleFileImport(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard let sourceURL = urls.first else { return }
+            isImporting = true
+
+            Task.detached(priority: .userInitiated) {
+                do {
+                    let book = try await importBook(from: sourceURL)
+                    await MainActor.run {
+                        modelContext.insert(book)
+                        isImporting = false
+                    }
+                } catch {
+                    await MainActor.run {
+                        importError = error.localizedDescription
+                        showImportError = true
+                        isImporting = false
+                    }
+                }
+            }
+
+        case .failure(let error):
+            importError = error.localizedDescription
+            showImportError = true
+        }
+    }
+
+    private func importBook(from sourceURL: URL) async throws -> Book {
+        let accessing = sourceURL.startAccessingSecurityScopedResource()
+        defer {
+            if accessing {
+                sourceURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        let fileName = sourceURL.lastPathComponent
+        let fileExtension = sourceURL.pathExtension.lowercased()
+        let uniqueFileName = "\(UUID().uuidString).\(fileExtension)"
+
+        // 移动文件到书籍目录
+        let destinationURL = try FileManagerService.shared.moveToDocuments(sourceURL, fileName: uniqueFileName)
+
+        // 获取文件大小
+        let fileSize = try? FileManager.default.attributesOfItem(atPath: destinationURL.path)[.size] as? Int64
+
+        // 创建书籍对象
+        let book = Book(
+            title: sourceURL.deletingPathExtension().lastPathComponent,
+            author: nil,
+            localFileName: uniqueFileName,
+            fileExtension: fileExtension
+        )
+        book.fileSize = fileSize
+        book.status = .downloaded
+
+        return book
     }
 
     // MARK: - 全部书籍书架

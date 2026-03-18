@@ -17,6 +17,12 @@ struct EPUBReaderView: View {
     @State private var isImmersive = false
     @State private var showHighlights = false
 
+    // 阅读时长统计
+    @State private var sessionStartTime: Date?
+
+    // 搜索
+    @State private var showSearch = false
+
     @Environment(\.dismiss) private var dismiss
 
     private let parsingService = EPUBParsingService()
@@ -74,11 +80,33 @@ struct EPUBReaderView: View {
         .sheet(isPresented: $showHighlights) {
             HighlightsListView(book: book)
         }
+        .sheet(isPresented: $showSearch) {
+            if let epubChapters = epubBook?.chapters {
+                EPUBInBookSearchView(
+                    book: book,
+                    chapters: epubChapters,
+                    chapterContents: epubChapters.indices.map { index in
+                        index == currentChapterIndex ? chapterContent : ""
+                    },
+                    onJumpToChapter: { chapterIndex, _, _ in
+                        currentChapterIndex = chapterIndex
+                        showSearch = false
+                        Task {
+                            await loadChapter(chapterIndex)
+                        }
+                    }
+                )
+            }
+        }
         .task {
             await loadContent()
         }
+        .onAppear {
+            sessionStartTime = Date()
+        }
         .onDisappear {
             saveReadingPosition()
+            recordReadingTime()
         }
     }
 
@@ -121,14 +149,20 @@ struct EPUBReaderView: View {
                             .foregroundColor(.blue)
                     }
 
-                    Button(action: { showSettings = true }) {
-                        Image(systemName: "textformat.size")
+                    Button(action: { showChapterList = true }) {
+                        Image(systemName: "list.bullet")
                             .font(.title3)
                             .foregroundColor(.blue)
                     }
 
-                    Button(action: { showChapterList = true }) {
-                        Image(systemName: "list.bullet")
+                    Button(action: { showSearch = true }) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.title3)
+                            .foregroundColor(.blue)
+                    }
+
+                    Button(action: { showSettings = true }) {
+                        Image(systemName: "textformat.size")
                             .font(.title3)
                             .foregroundColor(.blue)
                     }
@@ -498,6 +532,17 @@ struct EPUBReaderView: View {
         if let chapters = epubBook?.chapters, currentChapterIndex < chapters.count {
             book.currentChapterTitle = chapters[currentChapterIndex].title
         }
+    }
+
+    // MARK: - 阅读时长记录
+    private func recordReadingTime() {
+        guard let startTime = sessionStartTime else { return }
+        let elapsed = Date().timeIntervalSince(startTime)
+        if elapsed > 5 {
+            book.totalReadingTime += elapsed
+            book.lastReadingTime = Date()
+        }
+        sessionStartTime = nil
     }
 
     // MARK: - 辅助方法

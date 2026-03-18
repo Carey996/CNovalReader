@@ -23,9 +23,15 @@ struct TXTReaderView: View {
     @State private var textMenuPosition: CGPoint = .zero
     @State private var currentHighlightChapter: Int = 0
 
+    // 搜索
+    @State private var showSearch = false
+
     // 手势状态
     @State private var dragOffset: CGSize = .zero
     @State private var isDragging = false
+
+    // 阅读时长统计
+    @State private var sessionStartTime: Date?
 
     private var chapterNumberDisplay: String {
         guard !chapters.isEmpty else { return "" }
@@ -84,11 +90,25 @@ struct TXTReaderView: View {
         .sheet(isPresented: $showHighlights) {
             HighlightsListView(book: book)
         }
+        .sheet(isPresented: $showSearch) {
+            InBookSearchView(
+                book: book,
+                chapters: chapters,
+                onJumpToChapter: { chapterIndex, _, _ in
+                    currentChapterIndex = chapterIndex
+                    showSearch = false
+                }
+            )
+        }
         .task {
             await loadContentAsync()
         }
+        .onAppear {
+            sessionStartTime = Date()
+        }
         .onDisappear {
             saveReadingPosition()
+            recordReadingTime()
         }
     }
 
@@ -128,6 +148,12 @@ struct TXTReaderView: View {
 
                     Button(action: { showChapterList = true }) {
                         Image(systemName: "list.bullet")
+                            .font(.title3)
+                            .foregroundColor(.blue)
+                    }
+
+                    Button(action: { showSearch = true }) {
+                        Image(systemName: "magnifyingglass")
                             .font(.title3)
                             .foregroundColor(.blue)
                     }
@@ -656,6 +682,18 @@ struct TXTReaderView: View {
                 book.currentChapterTitle = chapters[currentChapterIndex].title
             }
         }
+    }
+
+    // MARK: - 阅读时长记录
+    private func recordReadingTime() {
+        guard let startTime = sessionStartTime else { return }
+        let elapsed = Date().timeIntervalSince(startTime)
+        // 只记录超过5秒的阅读时间，避免误触
+        if elapsed > 5 {
+            book.totalReadingTime += elapsed
+            book.lastReadingTime = Date()
+        }
+        sessionStartTime = nil
     }
 
     // MARK: - 辅助方法

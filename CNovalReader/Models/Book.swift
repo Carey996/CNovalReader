@@ -28,6 +28,10 @@ final class Book {
     var totalPages: Int?
     var readingPosition: Double?
 
+    // MARK: - 阅读时长统计
+    var totalReadingTime: TimeInterval
+    var lastReadingTime: Date?
+
     // MARK: - 章节状态持久化 (TXT)
     var currentChapterIndex: Int
     var currentChapterTitle: String?
@@ -99,6 +103,8 @@ final class Book {
         self.currentChapterIndex = 0
         self.currentChapterTitle = nil
         self.chaptersData = nil
+        self.totalReadingTime = 0
+        self.lastReadingTime = nil
     }
 }
 

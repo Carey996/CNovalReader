@@ -13,6 +13,9 @@ struct PDFReaderView: View {
     @State private var isImmersive = false
     @State private var showHighlights = false
 
+    // 阅读时长统计
+    @State private var sessionStartTime: Date?
+
     private var progressPercentage: Double {
         guard let total = pdfDocument?.pageCount, total > 0 else { return 0 }
         return Double(currentPage) / Double(total)
@@ -57,8 +60,12 @@ struct PDFReaderView: View {
         .task {
             await loadPDFAsync()
         }
+        .onAppear {
+            sessionStartTime = Date()
+        }
         .onDisappear {
             saveReadingPosition()
+            recordReadingTime()
         }
     }
 
@@ -290,6 +297,17 @@ struct PDFReaderView: View {
         if let total = book.totalPages, total > 0 {
             book.readingPosition = Double(currentPage) / Double(total)
         }
+    }
+
+    // MARK: - 阅读时长记录
+    private func recordReadingTime() {
+        guard let startTime = sessionStartTime else { return }
+        let elapsed = Date().timeIntervalSince(startTime)
+        if elapsed > 5 {
+            book.totalReadingTime += elapsed
+            book.lastReadingTime = Date()
+        }
+        sessionStartTime = nil
     }
 
     private func formatFileSize(_ bytes: Int64) -> String {

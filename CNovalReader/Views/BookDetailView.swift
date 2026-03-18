@@ -128,6 +128,11 @@ struct BookDetailView: View {
                         if case .downloading(let progress) = book.status {
                             infoRow(title: "Download", value: "\(Int(progress * 100))%")
                         }
+
+                        // 阅读时长
+                        if book.totalReadingTime > 0 {
+                            infoRow(title: "Total Reading", value: formattedReadingTime(book.totalReadingTime))
+                        }
                     }
                 }
                 .padding()
@@ -247,6 +252,15 @@ struct BookDetailView: View {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
         return formatter.string(fromByteCount: bytes)
+    }
+
+    private func formattedReadingTime(_ seconds: TimeInterval) -> String {
+        let hours = Int(seconds) / 3600
+        let minutes = (Int(seconds) % 3600) / 60
+        if hours > 0 {
+            return "\(hours)h \(minutes)m"
+        }
+        return "\(minutes)m"
     }
 
     // MARK: - 操作
