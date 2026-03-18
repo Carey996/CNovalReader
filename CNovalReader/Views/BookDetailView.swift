@@ -7,35 +7,58 @@ struct BookDetailView: View {
     let book: Book
     @State private var showReader = false
     @State private var showDeleteConfirmation = false
+    @State private var showCategoryEditor = false
+    @State private var isFetchingCover = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 // 封面
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(Color.gray.opacity(0.2))
-                    .frame(width: 200, height: 300)
-                    .frame(maxWidth: .infinity)
-                    .overlay {
-                        if let coverData = book.coverImageData,
-                           let uiImage = UIImage(data: coverData) {
-                            Image(uiImage: uiImage)
-                                .resizable()
-                                .aspectRatio(contentMode: .fit)
-                                .clipShape(RoundedRectangle(cornerRadius: 12))
-                        } else {
-                            VStack(spacing: 12) {
-                                Image(systemName: bookIconName)
-                                    .font(.system(size: 50))
-                                    .foregroundColor(.secondary)
-                                Text(book.fileExtension?.uppercased() ?? "BOOK")
-                                    .font(.caption)
-                                    .fontWeight(.medium)
-                                    .foregroundColor(.secondary)
+                ZStack(alignment: .bottomTrailing) {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(Color.gray.opacity(0.2))
+                        .frame(width: 200, height: 300)
+                        .frame(maxWidth: .infinity)
+                        .overlay {
+                            if let coverData = book.coverImageData,
+                               let uiImage = UIImage(data: coverData) {
+                                Image(uiImage: uiImage)
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fit)
+                                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                            } else {
+                                VStack(spacing: 12) {
+                                    Image(systemName: bookIconName)
+                                        .font(.system(size: 50))
+                                        .foregroundColor(.secondary)
+                                    Text(book.fileExtension?.uppercased() ?? "BOOK")
+                                        .font(.caption)
+                                        .fontWeight(.medium)
+                                        .foregroundColor(.secondary)
+                                }
                             }
                         }
+
+                    // 联网匹配封面按钮
+                    if book.coverImageData == nil {
+                        Button {
+                            fetchCover()
+                        } label: {
+                            if isFetchingCover {
+                                ProgressView()
+                                    .progressViewStyle(.circular)
+                                    .scaleEffect(0.8)
+                            } else {
+                                Image(systemName: "photo.badge.plus")
+                            }
+                        }
+                        .padding(10)
+                        .background(Color(UIColor.systemBackground).opacity(0.9))
+                        .clipShape(Circle())
+                        .padding(8)
                     }
-                    .padding(.vertical)
+                }
+                .padding(.vertical)
 
                 // 标题和作者
                 VStack(alignment: .leading, spacing: 8) {
@@ -78,6 +101,26 @@ struct BookDetailView: View {
 
                         infoRow(title: "Added", value: book.createdAt.formatted(date: .abbreviated, time: .shortened))
 
+                        // 分类行
+                        HStack {
+                            Text("Category")
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Button {
+                                showCategoryEditor = true
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Text(book.category ?? "未分类")
+                                        .fontWeight(.medium)
+                                        .foregroundColor(book.category == nil ? .secondary : .primary)
+                                    Image(systemName: "pencil")
+                                        .font(.caption)
+                                        .foregroundColor(.blue)
+                                }
+                            }
+                        }
+                        .font(.subheadline)
+
                         if case .reading = book.status, let position = book.readingPosition {
                             infoRow(title: "Progress", value: "\(Int(position * 100))%")
                         }
@@ -90,6 +133,30 @@ struct BookDetailView: View {
                 .padding()
                 .background(Color.gray.opacity(0.1))
                 .cornerRadius(12)
+
+                // 高亮/书签数量
+                if !book.highlights.isEmpty || !book.bookmarks.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Annotations")
+                            .font(.headline)
+
+                        HStack(spacing: 16) {
+                            if !book.highlights.isEmpty {
+                                Label("\(book.highlights.count) Highlights", systemImage: "highlighter")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            if !book.bookmarks.isEmpty {
+                                Label("\(book.bookmarks.count) Bookmarks", systemImage: "bookmark")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                    .padding()
+                    .background(Color.gray.opacity(0.1))
+                    .cornerRadius(12)
+                }
 
                 // 下载来源
                 if let remoteURL = book.remoteURL {
@@ -143,10 +210,12 @@ struct BookDetailView: View {
         } message: {
             Text("Are you sure you want to delete \"\(book.title)\"? This will remove the book from your library.")
         }
+        .sheet(isPresented: $showCategoryEditor) {
+            CategoryEditorSheet(book: book)
+        }
     }
 
     // MARK: - 辅助视图
-
     private func infoRow(title: String, value: String) -> some View {
         HStack {
             Text(title)
@@ -159,7 +228,6 @@ struct BookDetailView: View {
     }
 
     // MARK: - 辅助属性
-
     private var canRead: Bool {
         if case .downloaded = book.status {
             return book.localFileName != nil
@@ -182,13 +250,99 @@ struct BookDetailView: View {
     }
 
     // MARK: - 操作
-
     private func deleteBook() {
         if let fileName = book.localFileName {
             try? FileManagerService.shared.deleteBook(fileName: fileName)
         }
         modelContext.delete(book)
         dismiss()
+    }
+
+    private func fetchCover() {
+        isFetchingCover = true
+        Task {
+            if let coverData = await CoverFetchService.shared.fetchCover(title: book.title, author: book.author) {
+                await MainActor.run {
+                    book.coverImageData = coverData
+                    isFetchingCover = false
+                }
+            } else {
+                await MainActor.run {
+                    isFetchingCover = false
+                }
+            }
+        }
+    }
+}
+
+// MARK: - 分类编辑器
+struct CategoryEditorSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let book: Book
+    @State private var categoryText: String = ""
+    @State private var showDeleteConfirmation = false
+
+    private let suggestedCategories = ["玄幻", "都市", "科幻", "历史", "悬疑", "言情", "完结", "连载中", "技术"]
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("自定义分类") {
+                    TextField("输入分类名称", text: $categoryText)
+                        .onAppear {
+                            categoryText = book.category ?? ""
+                        }
+                }
+
+                Section("推荐分类") {
+                    ForEach(suggestedCategories, id: \.self) { cat in
+                        Button {
+                            categoryText = cat
+                        } label: {
+                            HStack {
+                                Text(cat)
+                                    .foregroundColor(.primary)
+                                Spacer()
+                                if categoryText == cat {
+                                    Image(systemName: "checkmark")
+                                        .foregroundColor(.blue)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if book.category != nil {
+                    Section {
+                        Button(role: .destructive) {
+                            book.category = nil
+                            dismiss()
+                        } label: {
+                            HStack {
+                                Spacer()
+                                Text("清除分类")
+                                Spacer()
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("选择分类")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("保存") {
+                        book.category = categoryText.isEmpty ? nil : categoryText
+                        dismiss()
+                    }
+                    .fontWeight(.semibold)
+                }
+            }
+        }
+        .presentationDetents([.medium])
     }
 }
 
@@ -198,7 +352,7 @@ struct BookDetailView: View {
 struct ReaderView: View {
     let book: Book
     @Environment(\.dismiss) private var dismiss
-    
+
     var body: some View {
         Group {
             switch book.fileExtension?.lowercased() {
@@ -213,23 +367,23 @@ struct ReaderView: View {
             }
         }
     }
-    
+
     private var unsupportedFormatView: some View {
         VStack(spacing: 20) {
             Image(systemName: "exclamationmark.triangle")
                 .font(.system(size: 50))
                 .foregroundColor(.orange)
-            
+
             Text("Unsupported Format")
                 .font(.title2)
                 .fontWeight(.bold)
-            
+
             Text("'\(book.fileExtension ?? "unknown")' is not supported.")
                 .font(.body)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
-            
+
             Button("Close") {
                 dismiss()
             }

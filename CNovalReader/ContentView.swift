@@ -329,6 +329,26 @@ struct ContentView: View {
     @State private var showDownloadSheet = false
     @State private var showSettings = false
     @State private var selectedTab = 0
+    @State private var selectedCategory: String? = nil
+
+    // MARK: - 计算属性：所有分类
+    private var allCategories: [String] {
+        var categories = Set<String>()
+        for book in allBooks {
+            if let cat = book.category, !cat.isEmpty {
+                categories.insert(cat)
+            }
+        }
+        return Array(categories).sorted()
+    }
+
+    // MARK: - 计算属性：过滤后的书籍
+    private var filteredBooks: [Book] {
+        if let cat = selectedCategory {
+            return allBooks.filter { $0.category == cat }
+        }
+        return allBooks
+    }
 
     private var recentBooks: [Book] {
         books.filter { book in
@@ -505,19 +525,24 @@ struct ContentView: View {
             HStack {
                 Image(systemName: "books.vertical")
                     .foregroundColor(BookshelfTheme.accentGold)
-                Text("全部书籍")
+                Text(selectedCategory ?? "全部书籍")
                     .font(.headline)
                     .foregroundColor(BookshelfTheme.shelfDark)
                 Spacer()
-                Text("\(allBooks.count) 本")
+                Text("\(filteredBooks.count) 本")
                     .font(.caption)
                     .foregroundColor(BookshelfTheme.shelfDark.opacity(0.6))
             }
             .padding(.horizontal, 16)
             .padding(.top, 16)
 
+            // 分类筛选 Tab
+            if !allCategories.isEmpty {
+                categoryFilterBar
+            }
+
             // 按每行5本分组显示为书架层
-            ForEach(Array(allBooks.chunked(into: 6).enumerated()), id: \.offset) { _, row in
+            ForEach(Array(filteredBooks.chunked(into: 6).enumerated()), id: \.offset) { _, row in
                 BookshelfRow(books: row)
                 if row.count > 0 {
                     Divider()
@@ -527,7 +552,7 @@ struct ContentView: View {
             }
 
             // 删除入口
-            if !allBooks.isEmpty {
+            if !filteredBooks.isEmpty {
                 NavigationLink {
                     ManageBooksView()
                 } label: {
@@ -542,6 +567,39 @@ struct ContentView: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
             }
+        }
+    }
+
+    // MARK: - 分类筛选栏
+    private var categoryFilterBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                // 全部
+                categoryChip(title: "全部", isSelected: selectedCategory == nil) {
+                    selectedCategory = nil
+                }
+
+                ForEach(allCategories, id: \.self) { cat in
+                    categoryChip(title: cat, isSelected: selectedCategory == cat) {
+                        selectedCategory = cat
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+        }
+    }
+
+    private func categoryChip(title: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.caption)
+                .fontWeight(isSelected ? .semibold : .regular)
+                .foregroundColor(isSelected ? .white : BookshelfTheme.shelfDark)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(isSelected ? BookshelfTheme.accentGold : Color.gray.opacity(0.15))
+                .cornerRadius(16)
         }
     }
 }
