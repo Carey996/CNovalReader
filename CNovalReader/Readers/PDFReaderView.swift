@@ -29,7 +29,7 @@ struct PDFReaderView: View {
                 }
             }
             .padding()
-            .background(Color(hex: settings.backgroundColor) ?? .white)
+            .background(Color(hex: settings.currentBackgroundColor) ?? Color(hex: "#1C1C1E")!)
             
             if let document = pdfDocument {
                 PDFKitView(document: document, currentPage: $currentPage)
@@ -61,7 +61,7 @@ struct PDFReaderView: View {
                     .disabled(currentPage >= document.pageCount)
                 }
                 .padding()
-                .background(Color(hex: settings.backgroundColor) ?? .white)
+                .background(Color(hex: settings.currentBackgroundColor) ?? Color(hex: "#1C1C1E")!)
             }
         }
         .navigationTitle("PDF 阅读器")

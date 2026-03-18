@@ -32,18 +32,18 @@ struct TXTReaderView: View {
                 }
             }
             .padding()
-            .background(Color(hex: settings.backgroundColor) ?? .white)
+            .background(Color(hex: settings.currentBackgroundColor) ?? Color(hex: "#1C1C1E")!)
             
             // 内容区域
             ScrollView {
                 Text(currentPageContent)
                     .font(.system(size: settings.fontSize))
-                    .foregroundColor(Color(hex: settings.textColor) ?? .black)
+                    .foregroundColor(Color(hex: settings.currentTextColor) ?? .white)
                     .lineSpacing(settings.lineSpacing)
                     .padding()
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .background(Color(hex: settings.backgroundColor) ?? .white)
+            .background(Color(hex: settings.currentBackgroundColor) ?? Color(hex: "#1C1C1E")!)
             
             // 底部翻页栏
             HStack {
@@ -69,7 +69,7 @@ struct TXTReaderView: View {
                 .disabled(currentPage >= totalPages)
             }
             .padding()
-            .background(Color(hex: settings.backgroundColor) ?? .white)
+            .background(Color(hex: settings.currentBackgroundColor) ?? Color(hex: "#1C1C1E")!)
         }
         .navigationTitle("TXT 阅读器")
         .navigationBarTitleDisplayMode(.inline)

@@ -18,7 +18,7 @@ struct EPUBReaderView: View {
     
     var body: some View {
         ZStack {
-            (Color(hex: settings.backgroundColor) ?? .white)
+            (Color(hex: settings.currentBackgroundColor) ?? Color(hex: "#1C1C1E")!)
                 .ignoresSafeArea()
             
             VStack(spacing: 0) {
@@ -94,7 +94,7 @@ struct EPUBReaderView: View {
             }
         }
         .padding()
-        .background(Color(hex: settings.backgroundColor) ?? .white)
+        .background(Color(hex: settings.currentBackgroundColor) ?? Color(hex: "#1C1C1E")!)
     }
     
     // MARK: - 内容视图
@@ -106,13 +106,13 @@ struct EPUBReaderView: View {
                     Text(chapter.title)
                         .font(.title2)
                         .fontWeight(.bold)
-                        .foregroundColor(Color(hex: settings.textColor) ?? .black)
+                        .foregroundColor(Color(hex: settings.currentTextColor) ?? .white)
                         .padding(.bottom, 8)
                 }
                 
                 Text(chapterContent)
                     .font(.system(size: settings.fontSize))
-                    .foregroundColor(Color(hex: settings.textColor) ?? .black)
+                    .foregroundColor(Color(hex: settings.currentTextColor) ?? .white)
                     .lineSpacing(settings.lineSpacing)
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -191,7 +191,7 @@ struct EPUBReaderView: View {
             }
         }
         .padding()
-        .background(Color(hex: settings.backgroundColor) ?? .white)
+        .background(Color(hex: settings.currentBackgroundColor) ?? Color(hex: "#1C1C1E")!)
     }
     
     // MARK: - 章节列表

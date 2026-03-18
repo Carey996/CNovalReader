@@ -3,11 +3,37 @@ import SwiftUI
 struct ReaderSettingsView: View {
     @ObservedObject var settings = ReaderSettings.shared
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
     @State private var showResetConfirmation = false
+    
+    private var isDarkMode: Bool {
+        if settings.colorSchemeOverride == 0 {
+            return colorScheme == .dark
+        }
+        return settings.colorSchemeOverride == 2
+    }
+    
+    private var currentBackgroundColors: [(name: String, color: String)] {
+        isDarkMode ? ReaderSettings.darkBackgroundColors : ReaderSettings.lightBackgroundColors
+    }
+    
+    private var currentTextColors: [(name: String, color: String)] {
+        isDarkMode ? ReaderSettings.darkTextColors : ReaderSettings.lightTextColors
+    }
     
     var body: some View {
         NavigationStack {
             Form {
+                // 主题模式
+                Section("主题模式") {
+                    Picker("显示模式", selection: $settings.colorSchemeOverride) {
+                        Text("跟随系统").tag(0)
+                        Text("浅色模式").tag(1)
+                        Text("深色模式").tag(2)
+                    }
+                    .pickerStyle(.segmented)
+                }
+                
                 // 字体大小
                 Section("字体") {
                     VStack(alignment: .leading, spacing: 8) {
@@ -62,27 +88,27 @@ struct ReaderSettingsView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         Text("背景色")
                         
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 60))], spacing: 12) {
-                            ForEach(0..<ReaderSettings.backgroundColors.count, id: \.self) { index in
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 70))], spacing: 12) {
+                            ForEach(0..<currentBackgroundColors.count, id: \.self) { index in
                                 Button {
                                     settings.backgroundColorIndex = index
                                 } label: {
                                     VStack(spacing: 4) {
-                                        Circle()
-                                            .fill(Color(hex: ReaderSettings.backgroundColors[index].color) ?? .white)
-                                            .frame(width: 44, height: 44)
+                                        RoundedRectangle(cornerRadius: 8)
+                                            .fill(Color(hex: currentBackgroundColors[index].color) ?? .white)
+                                            .frame(width: 50, height: 50)
                                             .overlay(
-                                                Circle()
-                                                    .stroke(settings.backgroundColorIndex == index ? Color.blue : Color.gray.opacity(0.3), 
+                                                RoundedRectangle(cornerRadius: 8)
+                                                    .stroke(settings.backgroundColorIndex == index ? Color.blue : Color.gray.opacity(0.3),
                                                             lineWidth: settings.backgroundColorIndex == index ? 3 : 1)
                                             )
                                             .overlay(
                                                 Image(systemName: "checkmark")
-                                                    .foregroundColor(settings.backgroundColorIndex == index ? .blue : .clear)
-                                                    .font(.caption)
+                                                    .foregroundColor(isDarkMode ? .white : .blue)
+                                                    .font(.caption.bold())
                                             )
                                         
-                                        Text(ReaderSettings.backgroundColors[index].name)
+                                        Text(currentBackgroundColors[index].name)
                                             .font(.caption2)
                                             .foregroundColor(.secondary)
                                     }
@@ -99,14 +125,14 @@ struct ReaderSettingsView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         Text("文字颜色")
                         
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 60))], spacing: 12) {
-                            ForEach(0..<ReaderSettings.textColors.count, id: \.self) { index in
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 70))], spacing: 12) {
+                            ForEach(0..<currentTextColors.count, id: \.self) { index in
                                 Button {
                                     settings.textColorIndex = index
                                 } label: {
                                     VStack(spacing: 4) {
                                         Circle()
-                                            .fill(Color(hex: ReaderSettings.textColors[index].color) ?? .black)
+                                            .fill(Color(hex: currentTextColors[index].color) ?? .black)
                                             .frame(width: 44, height: 44)
                                             .overlay(
                                                 Circle()
@@ -115,11 +141,11 @@ struct ReaderSettingsView: View {
                                             )
                                             .overlay(
                                                 Image(systemName: "checkmark")
-                                                    .foregroundColor(settings.textColorIndex == index ? (settings.textColorIndex < 2 ? .blue : .white) : .clear)
-                                                    .font(.caption)
+                                                    .foregroundColor(settings.textColorIndex == index ? (isDarkMode ? .black : .blue) : .clear)
+                                                    .font(.caption.bold())
                                             )
                                         
-                                        Text(ReaderSettings.textColors[index].name)
+                                        Text(currentTextColors[index].name)
                                             .font(.caption2)
                                             .foregroundColor(.secondary)
                                     }
@@ -133,7 +159,7 @@ struct ReaderSettingsView: View {
                 
                 // 预览
                 Section {
-                    ReaderPreviewView()
+                    ReaderPreviewView(isDarkMode: isDarkMode)
                         .frame(height: 120)
                         .listRowInsets(EdgeInsets())
                 } header: {
@@ -174,21 +200,22 @@ struct ReaderSettingsView: View {
 
 struct ReaderPreviewView: View {
     @ObservedObject var settings = ReaderSettings.shared
+    let isDarkMode: Bool
     
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("示例文字")
                 .font(.headline)
-                .foregroundColor(Color(hex: settings.textColor) ?? .black)
+                .foregroundColor(Color(hex: settings.currentTextColor) ?? (isDarkMode ? .white : .black))
             
             Text("这是预览效果，会根据您当前的设置显示。调整字体大小、背景色和文字颜色来获得最佳的阅读体验。")
                 .font(.system(size: settings.fontSize))
-                .foregroundColor(Color(hex: settings.textColor) ?? .black)
+                .foregroundColor(Color(hex: settings.currentTextColor) ?? (isDarkMode ? .white : .black))
                 .lineSpacing(settings.lineSpacing)
         }
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(hex: settings.backgroundColor) ?? .white)
+        .background(Color(hex: settings.currentBackgroundColor) ?? (isDarkMode ? Color(hex: "#1C1C1E")! : .white))
     }
 }
 
