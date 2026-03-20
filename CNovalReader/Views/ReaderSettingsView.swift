@@ -188,6 +188,26 @@ struct ReaderSettingsView: View {
                     Text("预览")
                 }
                 
+                // PDF 翻页模式
+                Section("PDF 翻页模式") {
+                    Toggle("PDF 滚动模式", isOn: $settings.pdfScrollMode)
+                    Text("关闭：滑动翻页 | 开启：连续滚动")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                
+                // TXT/EPUB 翻页模式
+                Section("TXT/EPUB 翻页模式") {
+                    Toggle("滑动翻页模式", isOn: $settings.pageTurnMode)
+                    Text("关闭：连续滚动 | 开启：滑动切换页面")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    
+                    if settings.pageTurnMode {
+                        Toggle("显示页码进度", isOn: $settings.pagesModeShowProgress)
+                    }
+                }
+                
                 // 重置
                 Section {
                     Button(role: .destructive) {

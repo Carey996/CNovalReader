@@ -125,8 +125,11 @@ struct InBookSearchView: View {
         isSearching = true
         searchResults = []
 
-        Task.detached(priority: .userInitiated) {
-            let results = kmpSearch(keyword: searchText, in: chapters)
+        let chaptersSnapshot = chapters
+        Task.detached(priority: .userInitiated) { [searchText] in
+            // 预加载所有章节内容（搜索需要全文内容）
+            let loadedChapters = Self.loadAllChaptersContent(chapters: chaptersSnapshot)
+            let results = Self.kmpSearchImpl(keyword: searchText, chapters: loadedChapters)
             await MainActor.run {
                 searchResults = results
                 isSearching = false
@@ -134,12 +137,46 @@ struct InBookSearchView: View {
         }
     }
 
-    private func kmpSearch(keyword: String, in chapters: [TXTChapter]) -> [SearchResult] {
+    /// 预加载所有章节内容（静态方法，在后台线程执行）
+    private static func loadAllChaptersContent(chapters: [TXTChapter]) -> [TXTChapter] {
+        var loaded: [TXTChapter] = []
+        for var chapter in chapters {
+            if chapter._content == nil || chapter._content?.isEmpty == true {
+                guard let data = FileManager.default.contents(atPath: chapter.filePath) else {
+                    loaded.append(chapter)
+                    continue
+                }
+                var text = String(data: data, encoding: .utf8)
+                if text == nil {
+                    let fallbackEncodings: [UInt] = [0x80000431, 0x6581, 5, 4]
+                    for encRaw in fallbackEncodings {
+                        if let s = String(data: data, encoding: String.Encoding(rawValue: encRaw)), !s.isEmpty {
+                            text = s
+                            break
+                        }
+                    }
+                }
+                if let fullText = text {
+                    let lines = fullText.components(separatedBy: .newlines)
+                    if chapter.startLine < lines.count {
+                        let endLine = min(chapter.endLine, lines.count)
+                        chapter._content = lines[chapter.startLine..<endLine].joined(separator: "\n")
+                    }
+                }
+            }
+            loaded.append(chapter)
+        }
+        return loaded
+    }
+
+    /// KMP 搜索实现（静态方法）
+    private static func kmpSearchImpl(keyword: String, chapters: [TXTChapter]) -> [SearchResult] {
         var results: [SearchResult] = []
         let lowercasedKeyword = keyword.lowercased()
 
         for (chapterIndex, chapter) in chapters.enumerated() {
-            let lowercasedContent = chapter.content.lowercased()
+            let chapterContent = chapter._content ?? ""
+            let lowercasedContent = chapterContent.lowercased()
             let lowercasedChapterTitle = chapter.title.lowercased()
 
             // 如果标题包含关键词
@@ -164,12 +201,12 @@ struct InBookSearchView: View {
                 let endOffset = lowercasedContent.distance(from: lowercasedContent.startIndex, to: matchedRange.upperBound)
 
                 // 提取上下文
-                let contextStartIndex = chapter.content.index(range.lowerBound, offsetBy: -30, limitedBy: chapter.content.startIndex) ?? chapter.content.startIndex
-                let contextEndIndex = chapter.content.index(range.upperBound, offsetBy: 30, limitedBy: chapter.content.endIndex) ?? chapter.content.endIndex
+                let contextStartIndex = chapterContent.index(range.lowerBound, offsetBy: -30, limitedBy: chapterContent.startIndex) ?? chapterContent.startIndex
+                let contextEndIndex = chapterContent.index(range.upperBound, offsetBy: 30, limitedBy: chapterContent.endIndex) ?? chapterContent.endIndex
 
-                let contextBefore = String(chapter.content[contextStartIndex..<range.lowerBound])
-                let matchedText = String(chapter.content[matchedRange])
-                let contextAfter = String(chapter.content[range.upperBound..<contextEndIndex])
+                let contextBefore = String(chapterContent[contextStartIndex..<range.lowerBound])
+                let matchedText = String(chapterContent[matchedRange])
+                let contextAfter = String(chapterContent[range.upperBound..<contextEndIndex])
 
                 let result = SearchResult(
                     chapterIndex: chapterIndex,

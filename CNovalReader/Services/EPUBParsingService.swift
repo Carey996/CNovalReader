@@ -519,3 +519,32 @@ actor EPUBParsingService {
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
+
+// MARK: - EPUB 章节适配器 (符合 ReadableChapter 协议)
+
+/// 适配器：将 EPUBParsingService.Chapter 转换为可读章节
+/// 用于 TTS 朗读时统一处理 EPUB 章节
+struct EPUBChapterAdapter: Identifiable, ReadableChapter, Equatable {
+    let chapter: EPUBParsingService.Chapter
+    var content: String
+    
+    var id: String { chapter.id }
+    
+    var chapterId: String { chapter.id }
+    var chapterTitle: String { chapter.title }
+    var chapterContent: String { content }
+    
+    init(chapter: EPUBParsingService.Chapter, content: String = "") {
+        self.chapter = chapter
+        self.content = content
+    }
+    
+    /// 更新内容（章节内容异步加载完成后调用）
+    mutating func setContent(_ newContent: String) {
+        self.content = newContent
+    }
+    
+    static func == (lhs: EPUBChapterAdapter, rhs: EPUBChapterAdapter) -> Bool {
+        lhs.chapter.id == rhs.chapter.id && lhs.content == rhs.content
+    }
+}

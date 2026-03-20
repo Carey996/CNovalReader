@@ -18,6 +18,24 @@ class ReaderSettings: ObservableObject {
         static let lineSpacing = "reader_lineSpacing"
         static let customFonts = "reader_customFonts"
         static let downloadedFontURLs = "reader_downloadedFontURLs"
+        static let pdfScrollMode = "reader_pdfScrollMode"
+        static let pageTurnMode = "reader_pageTurnMode"
+        static let pagesModeShowProgress = "reader_pagesModeShowProgress"
+    }
+
+    // MARK: - PDF 翻页模式 (true=滚动模式, false=滑动模式)
+    @Published var pdfScrollMode: Bool {
+        didSet { defaults.set(pdfScrollMode, forKey: Keys.pdfScrollMode) }
+    }
+    
+    // MARK: - TXT/EPUB 翻页模式 (true=滑动翻页, false=滚动)
+    @Published var pageTurnMode: Bool {
+        didSet { defaults.set(pageTurnMode, forKey: Keys.pageTurnMode) }
+    }
+    
+    // MARK: - 翻页模式是否显示页码进度
+    @Published var pagesModeShowProgress: Bool {
+        didSet { defaults.set(pagesModeShowProgress, forKey: Keys.pagesModeShowProgress) }
     }
     
     // MARK: - Color Scheme Override (0=system, 1=light, 2=dark)
@@ -132,6 +150,9 @@ class ReaderSettings: ObservableObject {
         self.lineSpacing = defaults.object(forKey: Keys.lineSpacing) as? Double ?? 6
         self.customFonts = defaults.stringArray(forKey: Keys.customFonts) ?? []
         self.downloadedFontURLs = defaults.stringArray(forKey: Keys.downloadedFontURLs) ?? []
+        self.pdfScrollMode = defaults.object(forKey: Keys.pdfScrollMode) as? Bool ?? true
+        self.pageTurnMode = defaults.object(forKey: Keys.pageTurnMode) as? Bool ?? false
+        self.pagesModeShowProgress = defaults.object(forKey: Keys.pagesModeShowProgress) as? Bool ?? true
     }
     
     // MARK: - 获取当前背景色
@@ -207,6 +228,9 @@ class ReaderSettings: ObservableObject {
         textColorIndex = 0
         fontFamily = "System"
         lineSpacing = 6
+        pdfScrollMode = true
+        pageTurnMode = false
+        pagesModeShowProgress = true
     }
 }
 

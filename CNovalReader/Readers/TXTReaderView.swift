@@ -1,6 +1,6 @@
 import SwiftUI
 
-// MARK: - TXT 阅读器 (章节滚动版 - 异步加载优化 + 手势 + 沉浸模式)
+// MARK: - TXT 阅读器 (翻页/滚动双模式)
 struct TXTReaderView: View {
     let book: Book
     @State private var chapters: [TXTChapter] = []
@@ -32,9 +32,24 @@ struct TXTReaderView: View {
 
     // 阅读时长统计
     @State private var sessionStartTime: Date?
+    
+    // TTS
+    @StateObject private var ttsService = TTSService.shared
+    @State private var showTTSSettings = false
+    
+    // MARK: - 翻页模式状态
+    @State private var pageModeCurrentPage: Int = 0
+    @State private var pageModeTotalPages: Int = 0
+    @State private var pageModePages: [String] = []
+    @State private var pageModeContainerSize: CGSize = .zero
+    @State private var pageModeOffset: CGFloat = 0
+    @State private var isAnimatingPage: Bool = false
 
     private var chapterNumberDisplay: String {
         guard !chapters.isEmpty else { return "" }
+        if settings.pageTurnMode && pageModeTotalPages > 0 {
+            return "第 \(pageModeCurrentPage + 1) / \(pageModeTotalPages) 页"
+        }
         return "第 \(currentChapterIndex + 1) 章 / 共 \(chapters.count) 章"
     }
 
@@ -54,8 +69,8 @@ struct TXTReaderView: View {
                     .opacity(isImmersive ? 0 : 1)
                     .animation(.easeInOut(duration: 0.2), value: isImmersive)
 
-                // 内容区（带手势）
-                contentScrollView
+                // 内容区
+                contentArea
                     .gesture(combinedGestures)
 
                 // 底部工具栏
@@ -76,6 +91,12 @@ struct TXTReaderView: View {
             // 边缘滑入检测（左/右边缘滑入显示工具栏）
             if isImmersive {
                 edgeRevealOverlay
+            }
+            
+            // TTS 控制条
+            if ttsService.isPlaying || ttsService.isPaused {
+                ttsControlBar
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
         .navigationTitle(chapters.isEmpty ? "TXT 阅读器" : chapterTitleDisplay)
@@ -100,6 +121,30 @@ struct TXTReaderView: View {
                 }
             )
         }
+        .sheet(isPresented: $showTTSSettings) {
+            TTSSettingsView()
+        }
+        .onChange(of: chapters.count) { _, newCount in
+            if newCount > 0 {
+                ttsService.configure(chapters: chapters, startChapter: currentChapterIndex)
+            }
+        }
+        .onChange(of: currentChapterIndex) { _, newIndex in
+            ttsService.configure(chapters: chapters, startChapter: newIndex)
+            if settings.pageTurnMode {
+                resetPageMode(for: newIndex)
+            }
+        }
+        .onChange(of: settings.fontSize) { _, _ in
+            if settings.pageTurnMode {
+                recomputePages()
+            }
+        }
+        .onChange(of: settings.lineSpacing) { _, _ in
+            if settings.pageTurnMode {
+                recomputePages()
+            }
+        }
         .task {
             await loadContentAsync()
         }
@@ -109,6 +154,201 @@ struct TXTReaderView: View {
         .onDisappear {
             saveReadingPosition()
             recordReadingTime()
+        }
+    }
+
+    // MARK: - 内容区域（翻页 vs 滚动）
+    @ViewBuilder
+    private var contentArea: some View {
+        if settings.pageTurnMode {
+            pageTurnContentView
+        } else {
+            contentScrollView
+        }
+    }
+    
+    // MARK: - 翻页模式内容视图
+    private var pageTurnContentView: some View {
+        GeometryReader { geo in
+            let containerSize = geo.size
+            
+            ZStack {
+                if pageModePages.isEmpty {
+                    // 加载中
+                    VStack(spacing: 16) {
+                        ProgressView()
+                        Text("计算分页中...")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if pageModeCurrentPage < pageModePages.count {
+                    let currentContent = pageModePages[pageModeCurrentPage]
+                    
+                    VStack(alignment: .leading, spacing: 0) {
+                        // 章节标题（仅第一页显示）
+                        if pageModeCurrentPage == 0 {
+                            Text(chapters[currentChapterIndex].title)
+                                .font(.title2)
+                                .fontWeight(.bold)
+                                .foregroundColor(Color(hex: settings.currentTextColor) ?? .white)
+                                .padding(.bottom, 12)
+                        }
+                        
+                        // 页面内容
+                        Text(currentContent)
+                            .font(.system(size: settings.fontSize))
+                            .foregroundColor(Color(hex: settings.currentTextColor) ?? .white)
+                            .lineSpacing(settings.lineSpacing)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 16)
+                    .offset(x: pageModeOffset)
+                    .gesture(pageDragGesture)
+                    .animation(.interactiveSpring(), value: pageModeOffset)
+                }
+                
+                // 页码指示器
+                if settings.pagesModeShowProgress && pageModeTotalPages > 0 {
+                    VStack {
+                        Spacer()
+                        HStack {
+                            Spacer()
+                            Text("\(pageModeCurrentPage + 1) / \(pageModeTotalPages)")
+                                .font(.caption)
+                                .foregroundColor(Color(hex: settings.currentTextColor)?.opacity(0.5) ?? .gray)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(.ultraThinMaterial)
+                                .cornerRadius(12)
+                                .padding(.trailing, 16)
+                                .padding(.bottom, 16)
+                        }
+                    }
+                }
+            }
+            .frame(width: containerSize.width, height: containerSize.height)
+            .background(Color(hex: settings.currentBackgroundColor) ?? Color(hex: "#1C1C1E")!)
+            .onAppear {
+                if pageModeContainerSize != containerSize {
+                    pageModeContainerSize = containerSize
+                    recomputePages()
+                }
+            }
+            .onChange(of: containerSize) { _, newSize in
+                pageModeContainerSize = newSize
+                recomputePages()
+            }
+        }
+    }
+    
+    // MARK: - 翻页拖拽手势
+    private var pageDragGesture: some Gesture {
+        DragGesture(minimumDistance: 20, coordinateSpace: .local)
+            .onChanged { value in
+                guard !isAnimatingPage else { return }
+                pageModeOffset = value.translation.width
+            }
+            .onEnded { value in
+                guard !isAnimatingPage else { return }
+                let threshold: CGFloat = 60
+                withAnimation(.interactiveSpring()) {
+                    if value.translation.width > threshold {
+                        // 右滑 → 上一页
+                        goToPreviousPage()
+                    } else if value.translation.width < -threshold {
+                        // 左滑 → 下一页
+                        goToNextPage()
+                    }
+                    pageModeOffset = 0
+                }
+            }
+    }
+    
+    // MARK: - 翻页控制
+    private func goToNextPage() {
+        guard pageModeCurrentPage < pageModeTotalPages - 1 else {
+            // 最后一页 → 下一章
+            if currentChapterIndex < chapters.count - 1 {
+                currentChapterIndex += 1
+                resetPageMode(for: currentChapterIndex)
+            }
+            return
+        }
+        isAnimatingPage = true
+        pageModeCurrentPage += 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            isAnimatingPage = false
+        }
+    }
+    
+    private func goToPreviousPage() {
+        guard pageModeCurrentPage > 0 else {
+            // 第一页 → 上一章
+            if currentChapterIndex > 0 {
+                currentChapterIndex -= 1
+                resetPageMode(for: currentChapterIndex)
+            }
+            return
+        }
+        isAnimatingPage = true
+        pageModeCurrentPage -= 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            isAnimatingPage = false
+        }
+    }
+    
+    // MARK: - 重置分页状态
+    private func resetPageMode(for chapterIndex: Int) {
+        guard chapterIndex < chapters.count else { return }
+        pageModeCurrentPage = 0
+        pageModeOffset = 0
+        recomputePages()
+    }
+    
+    // MARK: - 重新计算分页（先确保章节内容已加载）
+    private func recomputePages() {
+        guard currentChapterIndex < chapters.count else { return }
+        guard pageModeContainerSize.height > 0 else { return }
+
+        let chapter = chapters[currentChapterIndex]
+
+        // 如果内容未加载，先加载内容再计算分页
+        if chapter._content == nil || chapter._content?.isEmpty == true {
+            Task { @MainActor in
+                await self.preloadChapter(at: self.currentChapterIndex)
+                self.computePagesForCurrentChapter()
+            }
+            return
+        }
+
+        computePagesForCurrentChapter()
+    }
+
+    @MainActor
+    private func computePagesForCurrentChapter() {
+        guard currentChapterIndex < chapters.count else { return }
+        guard pageModeContainerSize.height > 0 else { return }
+
+        let chapter = chapters[currentChapterIndex]
+        let fontSize = CGFloat(settings.fontSize)
+        let lineHeight = fontSize + settings.lineSpacing
+        let content = chapter._content ?? ""
+
+        PaginationCalculator.precomputeTXTPagesFromContent(
+            content: content,
+            containerSize: pageModeContainerSize,
+            fontSize: fontSize,
+            lineHeight: lineHeight
+        ) { [self] pages in
+            pageModePages = pages
+            pageModeTotalPages = pages.count
+            // 确保当前页不越界
+            if pageModeCurrentPage >= pageModeTotalPages && pageModeTotalPages > 0 {
+                pageModeCurrentPage = pageModeTotalPages - 1
+            }
         }
     }
 
@@ -178,7 +418,11 @@ struct TXTReaderView: View {
                 metadataTag(book.createdAt.formatted(date: .abbreviated, time: .omitted))
 
                 if !chapters.isEmpty {
-                    metadataTag("第\(currentChapterIndex + 1)/\(chapters.count)章")
+                    if settings.pageTurnMode {
+                        metadataTag("第\(pageModeCurrentPage + 1)/\(max(1, pageModeTotalPages))页")
+                    } else {
+                        metadataTag("第\(currentChapterIndex + 1)/\(chapters.count)章")
+                    }
                 }
 
                 if let position = book.readingPosition {
@@ -209,37 +453,29 @@ struct TXTReaderView: View {
             .cornerRadius(4)
     }
 
-    // MARK: - 内容视图（带手势）
+    // MARK: - 滚动模式内容视图（惰性加载章节内容）
     private var contentScrollView: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(chapters.enumerated()), id: \.element.id) { index, chapter in
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(chapter.title)
-                                .font(.title2)
-                                .fontWeight(.bold)
-                                .foregroundColor(Color(hex: settings.currentTextColor) ?? .white)
-                                .padding(.top, index == 0 ? 0 : 24)
-                                .padding(.bottom, 12)
-                                .id(chapter.id)
-
-                            Text(chapter.content)
-                                .font(.system(size: settings.fontSize))
-                                .foregroundColor(Color(hex: settings.currentTextColor) ?? .white)
-                                .lineSpacing(settings.lineSpacing)
-                                .textSelection(.enabled)
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.bottom, 32)
-                        .background(
-                            GeometryReader { geo in
-                                Color.clear.preference(
-                                    key: ScrollOffsetKey.self,
-                                    value: geo.frame(in: .named("scroll")).minY
-                                )
+                        ChapterContentView(
+                            chapter: chapter,
+                            chapterIndex: index,
+                            fontSize: settings.fontSize,
+                            textColor: settings.currentTextColor,
+                            lineSpacing: settings.lineSpacing,
+                            onLoadContent: { loadedContent in
+                                // 内容加载完成后更新 chapters 数组
+                                Task { @MainActor in
+                                    guard index < self.chapters.count else { return }
+                                    var updated = self.chapters[index]
+                                    updated._content = loadedContent
+                                    self.chapters[index] = updated
+                                }
                             }
                         )
+                        .id(chapter.id)
                     }
                 }
                 .padding(.vertical, 12)
@@ -250,6 +486,10 @@ struct TXTReaderView: View {
             }
             .onChange(of: currentChapterIndex) { _, newIndex in
                 guard newIndex < chapters.count else { return }
+                // 切换章节时预加载该章节内容
+                Task { @MainActor in
+                    await self.preloadChapter(at: newIndex)
+                }
                 withAnimation(.easeInOut(duration: 0.3)) {
                     proxy.scrollTo(chapters[newIndex].id, anchor: .top)
                 }
@@ -261,7 +501,6 @@ struct TXTReaderView: View {
     // MARK: - 手势处理
     private var combinedGestures: some Gesture {
         SimultaneousGesture(
-            // 拖拽手势：左滑上一页，右滑下一页，下滑下一章
             DragGesture(minimumDistance: 30, coordinateSpace: .local)
                 .onChanged { value in
                     isDragging = true
@@ -272,7 +511,6 @@ struct TXTReaderView: View {
                     handleSwipeEnd(translation: value.translation)
                     dragOffset = .zero
                 },
-            // 双击：切换沉浸模式
             TapGesture(count: 2)
                 .onEnded {
                     withAnimation {
@@ -283,23 +521,20 @@ struct TXTReaderView: View {
     }
 
     private func handleSwipeEnd(translation: CGSize) {
+        // 翻页模式下不处理章节级别的滑动
+        guard !settings.pageTurnMode else { return }
+        
         let horizontal = translation.width
         let vertical = translation.height
 
-        // 判断主要方向
         if abs(horizontal) > abs(vertical) {
-            // 水平滑动
             if horizontal > 60 {
-                // 右滑 → 上一页
                 previousChapter()
             } else if horizontal < -60 {
-                // 左滑 → 下一页
                 nextChapter()
             }
         } else {
-            // 垂直滑动
             if vertical > 80 {
-                // 下滑 → 下一章
                 nextChapter()
             }
         }
@@ -308,7 +543,6 @@ struct TXTReaderView: View {
     // MARK: - 边缘滑入显示工具栏
     private var edgeRevealOverlay: some View {
         HStack(spacing: 0) {
-            // 左侧边缘区域
             GeometryReader { geo in
                 Color.clear
                     .contentShape(Rectangle())
@@ -325,7 +559,6 @@ struct TXTReaderView: View {
 
             Spacer()
 
-            // 右侧边缘区域
             GeometryReader { geo in
                 Color.clear
                     .contentShape(Rectangle())
@@ -359,16 +592,15 @@ struct TXTReaderView: View {
 
     // MARK: - 高亮/书签操作
     private func addHighlight() {
-        // 注意：SwiftUI 的 textSelection 不提供选中文字 API，
-        // 这里使用章节内容中提取高亮文本
         if currentChapterIndex < chapters.count {
             let chapter = chapters[currentChapterIndex]
-            let text = chapter.content.prefix(50) + "..."
+            let content = chapter._content ?? ""
+            let text = content.prefix(50)
             let highlight = Highlight(
                 text: String(text),
                 chapterIndex: currentChapterIndex,
                 rangeStart: 0,
-                rangeEnd: min(50, chapter.content.count)
+                rangeEnd: min(50, content.count)
             )
             var highlights = book.highlights
             highlights.append(highlight)
@@ -387,10 +619,76 @@ struct TXTReaderView: View {
     }
 
     private func addNote() {
-        // 显示一个简短提示（实际笔记功能需要更复杂的UI）
         addHighlight()
     }
 
+    // MARK: - TTS 控制条
+    private var ttsControlBar: some View {
+        VStack(spacing: 0) {
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    Rectangle()
+                        .fill(Color.gray.opacity(0.3))
+                        .frame(height: 3)
+                    
+                    Rectangle()
+                        .fill(Color.blue)
+                        .frame(width: geometry.size.width * ttsService.progress, height: 3)
+                }
+                .cornerRadius(1.5)
+            }
+            .frame(height: 3)
+            .padding(.horizontal)
+            .padding(.top, 8)
+            
+            HStack(spacing: 20) {
+                Button(action: { ttsService.previousChapter() }) {
+                    Image(systemName: "backward.fill")
+                        .font(.title3)
+                }
+                .disabled(ttsService.currentChapterIndex <= 0)
+                
+                Button(action: {
+                    if ttsService.isPlaying {
+                        ttsService.pause()
+                    } else {
+                        ttsService.play()
+                    }
+                }) {
+                    Image(systemName: ttsService.isPlaying ? "pause.fill" : "play.fill")
+                        .font(.title2)
+                }
+                
+                Button(action: { ttsService.nextChapter() }) {
+                    Image(systemName: "forward.fill")
+                        .font(.title3)
+                }
+                .disabled(ttsService.currentChapterIndex >= chapters.count - 1)
+                
+                Spacer()
+                
+                Text("第 \(ttsService.currentChapterIndex + 1) 章 / 共 \(chapters.count) 章")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                
+                Spacer()
+                
+                Button(action: { showTTSSettings = true }) {
+                    Image(systemName: "gearshape")
+                        .font(.title3)
+                }
+                
+                Button(action: { ttsService.stop() }) {
+                    Image(systemName: "stop.fill")
+                        .font(.title3)
+                }
+            }
+            .padding()
+        }
+        .background(.ultraThinMaterial)
+        .cornerRadius(16, corners: [.topLeft, .topRight])
+    }
+    
     // MARK: - 底部工具栏
     private var bottomToolbar: some View {
         VStack(spacing: 8) {
@@ -447,6 +745,12 @@ struct TXTReaderView: View {
 
     private var progressPercentage: Double {
         guard !chapters.isEmpty else { return 0 }
+        if settings.pageTurnMode {
+            guard pageModeTotalPages > 0 else { return 0 }
+            let chapterProgress = Double(currentChapterIndex) / Double(chapters.count)
+            let pageInChapter = Double(pageModeCurrentPage) / Double(pageModeTotalPages)
+            return chapterProgress + (pageInChapter / Double(chapters.count))
+        }
         return Double(currentChapterIndex + 1) / Double(chapters.count)
     }
 
@@ -523,120 +827,236 @@ struct TXTReaderView: View {
 
     @MainActor
     private func loadChaptersWithContent(bookPath: URL, persistedChapters: [PersistedChapterInfo], bookID: UUID) async {
-        do {
-            let data = try Data(contentsOf: bookPath)
+        let filePath = bookPath.path
 
-            var content: String?
-            var convertedString: NSString?
-            var usedLossy: ObjCBool = false
-            let detectedEncoding = NSString.stringEncoding(
-                for: data,
-                encodingOptions: [:],
-                convertedString: &convertedString,
-                usedLossyConversion: &usedLossy
-            )
-            if detectedEncoding != 0, let str = convertedString {
-                content = str as String
-            }
-
-            if content == nil {
-                let fallbackEncodings: [UInt] = [0x6581, 4, 0x80000003, 0x80000431, 6, 5, 0x80000421]
-                for encodingRaw in fallbackEncodings {
-                    let encoding = String.Encoding(rawValue: encodingRaw)
-                    if let str = String(data: data, encoding: encoding), !str.isEmpty {
-                        content = str
-                        break
-                    }
-                }
-            }
-
-            guard let text = content else { return }
-
-            let lines = text.components(separatedBy: .newlines)
-
-            let rebuiltChapters = persistedChapters.map { persisted -> TXTChapter in
-                let endLine = min(persisted.endLine, lines.count)
-                let startLine = min(persisted.startLine, endLine)
-                let chapterContent = lines[startLine..<endLine].joined(separator: "\n")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                return TXTChapter(
-                    id: persisted.id,
-                    title: persisted.title,
-                    startLine: persisted.startLine,
-                    endLine: persisted.endLine,
-                    content: chapterContent
-                )
-            }
-
-            self.chapters = rebuiltChapters
-
-        } catch {
+        // 1. 检测编码（先读 4KB 头部）
+        let encoding = await detectEncoding(bookPath: bookPath)
+        guard let enc = encoding else {
             await parseAndLoadContent(bookPath: bookPath)
+            return
+        }
+
+        // 2. 在后台加载文件并构建惰性章节
+        let rebuiltChapters: [TXTChapter] = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                guard let data = try? Data(contentsOf: bookPath),
+                      let text = String(data: data, encoding: enc) else {
+                    continuation.resume(returning: [])
+                    return
+                }
+
+                let lines = text.components(separatedBy: .newlines)
+                let chapters = persistedChapters.map { persisted -> TXTChapter in
+                    TXTChapter(
+                        id: persisted.id,
+                        title: persisted.title,
+                        startLine: persisted.startLine,
+                        endLine: persisted.endLine,
+                        _content: nil,
+                        filePath: filePath
+                    )
+                }
+                continuation.resume(returning: chapters)
+            }
+        }
+
+        guard !rebuiltChapters.isEmpty else {
+            await parseAndLoadContent(bookPath: bookPath)
+            return
+        }
+
+        self.chapters = rebuiltChapters
+
+        // 3. 预加载当前章节内容（供立即阅读）
+        await preloadChapter(at: currentChapterIndex)
+
+        if settings.pageTurnMode {
+            recomputePages()
         }
     }
 
     private func parseAndLoadContent(bookPath: URL) async {
         isLoading = true
+        let filePath = bookPath.path
 
-        do {
-            let data = try Data(contentsOf: bookPath)
+        // 1. 检测编码（先读 4KB 头部，不阻塞主线程）
+        let encoding = await detectEncoding(bookPath: bookPath)
+        guard let enc = encoding else {
+            errorMessage = "不支持的文件编码"
+            isLoading = false
+            return
+        }
 
-            var content: String?
-            var convertedString: NSString?
-            var usedLossy: ObjCBool = false
-            let detectedEncoding = NSString.stringEncoding(
-                for: data,
-                encodingOptions: [:],
-                convertedString: &convertedString,
-                usedLossyConversion: &usedLossy
-            )
-            if detectedEncoding != 0, let str = convertedString {
-                content = str as String
+        // 2. 在后台加载文件 + 章节边界检测
+        typealias ChapterBoundary = (startLine: Int, endLine: Int, title: String)
+        let (lines, boundaries, totalLines): ([String], [ChapterBoundary], Int) = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                guard let data = try? Data(contentsOf: bookPath),
+                      let text = String(data: data, encoding: enc) else {
+                    continuation.resume(returning: ([], [], 0))
+                    return
+                }
+                let allLines = text.components(separatedBy: .newlines)
+                let bookTitle = self.book.title
+                let bounds = detectChapterBoundaries(allLines, bookTitle: bookTitle)
+                continuation.resume(returning: (allLines, bounds, allLines.count))
             }
+        }
 
-            if content == nil {
+        guard !lines.isEmpty else {
+            errorMessage = "文件为空或无法读取"
+            isLoading = false
+            return
+        }
+
+        // 3. 构建章节（只存储边界，不存储内容）
+        var finalChapters: [TXTChapter]
+        if boundaries.isEmpty {
+            finalChapters = [TXTChapter(
+                id: "chapter_0",
+                title: book.title,
+                startLine: 0,
+                endLine: totalLines,
+                _content: lines[0..<totalLines].joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines),
+                filePath: filePath
+            )]
+        } else {
+            finalChapters = boundaries.enumerated().map { index, boundary in
+                TXTChapter(
+                    id: "chapter_\(index + 1)",
+                    title: boundary.title,
+                    startLine: boundary.startLine,
+                    endLine: boundary.endLine,
+                    _content: nil,
+                    filePath: filePath
+                )
+            }
+        }
+
+        persistChapters(finalChapters)
+
+        let startIndex = book.currentChapterIndex > 0 && book.currentChapterIndex < finalChapters.count
+            ? book.currentChapterIndex : 0
+
+        chapters = finalChapters
+        isLoading = false
+
+        // 4. 预加载当前章节内容
+        await preloadChapter(at: startIndex)
+
+        if book.currentChapterIndex > 0 && book.currentChapterIndex < finalChapters.count {
+            currentChapterIndex = book.currentChapterIndex
+        }
+
+        if settings.pageTurnMode {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                self.recomputePages()
+            }
+        }
+    }
+
+    // MARK: - 编码检测（先读 4KB 头部）
+    private func detectEncoding(bookPath: URL) async -> String.Encoding? {
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let headerData: Data?
+                if #available(iOS 17.0, macOS 14.0, *) {
+                    headerData = try? Data(contentsOf: bookPath, options: .mappedIfSafe)
+                } else {
+                    headerData = FileManager.default.contents(atPath: bookPath.path)
+                }
+
+                guard let data = headerData else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                // 只用前 4KB 检测编码
+                let headerBytes = data.prefix(4096)
+                let headerString = String(data: Data(headerBytes), encoding: .ascii)
+                    ?? String(data: Data(headerBytes), encoding: .isoLatin1)
+
+                // BOM 检测
+                if data.count >= 3 {
+                    let bom = [UInt8](data.prefix(3))
+                    if bom[0] == 0xEF && bom[1] == 0xBB && bom[2] == 0xBF {
+                        continuation.resume(returning: .utf8)
+                        return
+                    }
+                }
+                if data.count >= 2 {
+                    let bom = [UInt8](data.prefix(2))
+                    if bom[0] == 0xFF && bom[1] == 0xFE {
+                        continuation.resume(returning: .utf16LittleEndian)
+                        return
+                    }
+                    if bom[0] == 0xFE && bom[1] == 0xFF {
+                        continuation.resume(returning: .unicode)
+                        return
+                    }
+                }
+
+                // NSString 自动检测
+                var convertedString: NSString?
+                var usedLossy: ObjCBool = false
+                let detectedEncoding = NSString.stringEncoding(
+                    for: Data(headerBytes),
+                    encodingOptions: [:],
+                    convertedString: &convertedString,
+                    usedLossyConversion: &usedLossy
+                )
+                if detectedEncoding != 0 {
+                    let encoding = String.Encoding(rawValue: detectedEncoding)
+                    continuation.resume(returning: encoding)
+                    return
+                }
+
+                // Fallback 编码尝试
                 let fallbackEncodings: [UInt] = [0x6581, 4, 0x80000003, 0x80000431, 6, 5, 0x80000421]
                 for encodingRaw in fallbackEncodings {
                     let encoding = String.Encoding(rawValue: encodingRaw)
-                    if let str = String(data: data, encoding: encoding), !str.isEmpty {
-                        content = str
-                        break
+                    if let str = String(data: Data(headerBytes), encoding: encoding), !str.isEmpty {
+                        continuation.resume(returning: encoding)
+                        return
                     }
                 }
+
+                continuation.resume(returning: nil)
             }
+        }
+    }
 
-            guard let text = content else {
-                errorMessage = "不支持的文件编码"
-                isLoading = false
-                return
+    // MARK: - 惰性章节内容加载
+    /// 加载指定章节的内容（在后台线程执行）
+    private func loadChapterContent(chapter: TXTChapter, encoding: String.Encoding) -> String {
+        guard let data = FileManager.default.contents(atPath: chapter.filePath) else { return "" }
+        guard let text = String(data: data, encoding: encoding) else { return "" }
+        let lines = text.components(separatedBy: .newlines)
+        guard chapter.startLine < lines.count else { return "" }
+        let endLine = min(chapter.endLine, lines.count)
+        return lines[chapter.startLine..<endLine].joined(separator: "\n")
+    }
+
+    /// 预加载章节内容到内存（后台执行，不阻塞主线程）
+    @MainActor
+    private func preloadChapter(at index: Int) async {
+        guard index >= 0 && index < chapters.count else { return }
+        var chapter = chapters[index]
+        guard chapter._content == nil else { return }  // 已有内容则跳过
+
+        let encoding = await detectEncoding(bookPath: URL(fileURLWithPath: chapter.filePath))
+        guard let enc = encoding else { return }
+
+        let content = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let loaded = self.loadChapterContent(chapter: chapter, encoding: enc)
+                continuation.resume(returning: loaded)
             }
+        }
 
-            let bookTitle = book.title
-            let parsedChapters = detectChaptersFromText(text, bookTitle: bookTitle)
-
-            var finalChapters = parsedChapters
-            if finalChapters.isEmpty {
-                finalChapters = [TXTChapter(
-                    id: "chapter_0",
-                    title: bookTitle,
-                    startLine: 0,
-                    endLine: text.components(separatedBy: .newlines).count,
-                    content: text
-                )]
-            }
-
-            persistChapters(finalChapters)
-
-            if book.currentChapterIndex > 0 && book.currentChapterIndex < finalChapters.count {
-                currentChapterIndex = book.currentChapterIndex
-            }
-
-            chapters = finalChapters
-            isLoading = false
-
-        } catch {
-            errorMessage = "无法读取文件: \(error.localizedDescription)"
-            isLoading = false
+        if !content.isEmpty {
+            chapter._content = content
+            chapters[index] = chapter
         }
     }
 
@@ -676,8 +1096,14 @@ struct TXTReaderView: View {
         book.totalPages = chapters.count
         book.lastReadAt = Date()
         if !chapters.isEmpty {
-            book.currentPage = currentChapterIndex
-            book.readingPosition = Double(currentChapterIndex + 1) / Double(chapters.count)
+            if settings.pageTurnMode {
+                book.currentPage = currentChapterIndex * max(1, pageModeTotalPages) + pageModeCurrentPage
+                book.totalPages = chapters.count * max(1, pageModeTotalPages)
+                book.readingPosition = progressPercentage
+            } else {
+                book.currentPage = currentChapterIndex
+                book.readingPosition = Double(currentChapterIndex + 1) / Double(chapters.count)
+            }
             if currentChapterIndex < chapters.count {
                 book.currentChapterTitle = chapters[currentChapterIndex].title
             }
@@ -688,7 +1114,6 @@ struct TXTReaderView: View {
     private func recordReadingTime() {
         guard let startTime = sessionStartTime else { return }
         let elapsed = Date().timeIntervalSince(startTime)
-        // 只记录超过5秒的阅读时间，避免误触
         if elapsed > 5 {
             book.totalReadingTime += elapsed
             book.lastReadingTime = Date()
@@ -702,40 +1127,6 @@ struct TXTReaderView: View {
         formatter.countStyle = .file
         return formatter.string(fromByteCount: bytes)
     }
-
-    private var loadingView: some View {
-        VStack(spacing: 16) {
-            ProgressView()
-                .scaleEffect(1.5)
-            Text("加载中...")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private func errorView(_ message: String) -> some View {
-        VStack(spacing: 16) {
-            Image(systemName: "exclamationmark.triangle")
-                .font(.system(size: 48))
-                .foregroundColor(.orange)
-
-            Text("加载失败")
-                .font(.headline)
-
-            Text(message)
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 32)
-
-            Button("重试") {
-                Task { await loadContentAsync() }
-            }
-            .buttonStyle(.borderedProminent)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
 }
 
 // MARK: - ScrollOffset Preference Key
@@ -743,5 +1134,107 @@ struct ScrollOffsetKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = nextValue()
+    }
+}
+
+// MARK: - 惰性章节内容视图
+/// 负责惰性加载并显示章节内容
+struct ChapterContentView: View {
+    let chapter: TXTChapter
+    let chapterIndex: Int
+    let fontSize: CGFloat
+    let textColor: String
+    let lineSpacing: CGFloat
+    let onLoadContent: (String) -> Void
+
+    @State private var loadedContent: String = ""
+    @State private var isLoading: Bool = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(chapter.title)
+                .font(.title2)
+                .fontWeight(.bold)
+                .foregroundColor(Color(hex: textColor) ?? .white)
+                .padding(.top, chapterIndex == 0 ? 0 : 24)
+                .padding(.bottom, 12)
+
+            if loadedContent.isEmpty && isLoading {
+                ProgressView()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else if !loadedContent.isEmpty {
+                Text(loadedContent)
+                    .font(.system(size: fontSize))
+                    .foregroundColor(Color(hex: textColor) ?? .white)
+                    .lineSpacing(lineSpacing)
+                    .textSelection(.enabled)
+            } else {
+                // 占位高度，防止滚动跳动
+                Color.clear.frame(height: 100)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 32)
+        .background(
+            GeometryReader { geo in
+                Color.clear.preference(
+                    key: ScrollOffsetKey.self,
+                    value: geo.frame(in: .named("scroll")).minY
+                )
+            }
+        )
+        .task(id: chapter.id) {
+            // 首次访问且内容未加载时，触发惰性加载
+            if chapter._content == nil && !isLoading && loadedContent.isEmpty {
+                isLoading = true
+                await loadContent()
+                isLoading = false
+            }
+        }
+        .onAppear {
+            // 如果章节内容已在 chapters 数组中加载，直接使用
+            if let content = chapter._content, !content.isEmpty {
+                loadedContent = content
+            }
+        }
+    }
+
+    private func loadContent() async {
+        let content = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                guard let data = FileManager.default.contents(atPath: chapter.filePath) else {
+                    continuation.resume(returning: "")
+                    return
+                }
+                // 尝试 UTF-8 编码
+                var text = String(data: data, encoding: .utf8)
+                if text == nil {
+                    let fallbackEncodings: [UInt] = [0x80000431, 0x6581, 5, 4]
+                    for encRaw in fallbackEncodings {
+                        if let s = String(data: data, encoding: String.Encoding(rawValue: encRaw)), !s.isEmpty {
+                            text = s
+                            break
+                        }
+                    }
+                }
+                guard let fullText = text else {
+                    continuation.resume(returning: "")
+                    return
+                }
+                let lines = fullText.components(separatedBy: .newlines)
+                guard chapter.startLine < lines.count else {
+                    continuation.resume(returning: "")
+                    return
+                }
+                let endLine = min(chapter.endLine, lines.count)
+                let content = lines[chapter.startLine..<endLine].joined(separator: "\n")
+                continuation.resume(returning: content)
+            }
+        }
+
+        if !content.isEmpty {
+            loadedContent = content
+            onLoadContent(content)
+        }
     }
 }

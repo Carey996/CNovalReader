@@ -178,19 +178,52 @@ struct Bookmark: Codable, Identifiable, Equatable {
     }
 }
 
-// MARK: - TXT 章节模型
+// MARK: - TXT 章节模型（惰性加载内容）
 struct TXTChapter: Identifiable, Hashable {
     let id: String
     let title: String
     let startLine: Int
     let endLine: Int
-    let content: String
+    var _content: String?  // nil = 未加载
+    let filePath: String   // 文件路径，用于惰性加载
+
+    /// 惰性加载的章节内容
+    /// 首次访问时从文件按行范围加载，之后缓存
+    var content: String {
+        get {
+            if let c = _content { return c }
+            return ""  // 未加载状态，调用方应确保已加载
+        }
+    }
+
+    /// 设置章节内容（由外部调用加载后注入）
+    mutating func setContent(_ content: String) {
+        _content = content
+    }
+
+    /// 标记内容已加载
+    var isContentLoaded: Bool { _content != nil }
 }
 
-// MARK: - 章节智能检测 (独立函数，可在任何上下文中调用)
-func detectChaptersFromText(_ text: String, bookTitle: String) -> [TXTChapter] {
-    var detectedChapters: [TXTChapter] = []
-    let lines = text.components(separatedBy: .newlines)
+// MARK: - 惰性章节内容加载器
+enum LazyContentLoader {
+    /// 从文件指定行范围加载内容（在后台线程调用）
+    static func loadChapterContent(filePath: String, startLine: Int, endLine: Int, encoding: String.Encoding) -> String {
+        guard let data = FileManager.default.contents(atPath: filePath),
+              let text = String(data: data, encoding: encoding) else {
+            return ""
+        }
+        let lines = text.components(separatedBy: .newlines)
+        guard startLine < lines.count else { return "" }
+        let safeEndLine = min(endLine, lines.count)
+        return lines[startLine..<safeEndLine].joined(separator: "\n")
+    }
+}
+
+// MARK: - 章节智能检测 (仅扫描边界，不处理内容)
+// 优化：只扫描章节标题行记录行号范围，不拼接内容，大幅降低内存和 CPU 消耗
+func detectChapterBoundaries(_ lines: [String], bookTitle: String) -> [(startLine: Int, endLine: Int, title: String)] {
+    var boundaries: [(startLine: Int, endLine: Int, title: String)] = []
 
     let chapterPatterns = [
         #"^第[零一二三四五六七八九十百千0-9〇○]+章[:：]?\s*(.*)$"#,
@@ -265,21 +298,11 @@ func detectChaptersFromText(_ text: String, bookTitle: String) -> [TXTChapter] {
         }
 
         if isChapterTitle {
-            if chapterCounter > 0 || !detectedChapters.isEmpty {
+            if chapterCounter > 0 || !boundaries.isEmpty {
                 let endLine = index > 0 ? index - 1 : 0
                 if endLine > currentChapterStart {
-                    let chapterContent = lines[currentChapterStart..<endLine].joined(separator: "\n")
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !chapterContent.isEmpty {
-                        let title = pendingChapterTitle ?? "第\(chapterCounter)章"
-                        detectedChapters.append(TXTChapter(
-                            id: "chapter_\(chapterCounter)",
-                            title: title,
-                            startLine: currentChapterStart,
-                            endLine: endLine,
-                            content: chapterContent
-                        ))
-                    }
+                    let title = pendingChapterTitle ?? "第\(chapterCounter)章"
+                    boundaries.append((startLine: currentChapterStart, endLine: endLine, title: title))
                 }
             }
 
@@ -290,19 +313,26 @@ func detectChaptersFromText(_ text: String, bookTitle: String) -> [TXTChapter] {
     }
 
     if currentChapterStart < lines.count {
-        let chapterContent = lines[currentChapterStart..<lines.count].joined(separator: "\n")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if !chapterContent.isEmpty {
-            let lastTitle = pendingChapterTitle ?? "第\(chapterCounter)章"
-            detectedChapters.append(TXTChapter(
-                id: "chapter_\(chapterCounter)",
-                title: lastTitle,
-                startLine: currentChapterStart,
-                endLine: lines.count,
-                content: chapterContent
-            ))
-        }
+        let lastTitle = pendingChapterTitle ?? "第\(chapterCounter)章"
+        boundaries.append((startLine: currentChapterStart, endLine: lines.count, title: lastTitle))
     }
 
-    return detectedChapters
+    return boundaries
+}
+
+/// 兼容旧接口：根据文本检测章节（惰性，内部只扫描边界）
+func detectChaptersFromText(_ text: String, bookTitle: String, filePath: String = "") -> [TXTChapter] {
+    let lines = text.components(separatedBy: .newlines)
+    let boundaries = detectChapterBoundaries(lines, bookTitle: bookTitle)
+
+    return boundaries.enumerated().map { index, boundary in
+        TXTChapter(
+            id: "chapter_\(index + 1)",
+            title: boundary.title,
+            startLine: boundary.startLine,
+            endLine: boundary.endLine,
+            _content: nil,
+            filePath: filePath
+        )
+    }
 }

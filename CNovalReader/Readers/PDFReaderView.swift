@@ -13,6 +13,10 @@ struct PDFReaderView: View {
     @State private var isImmersive = false
     @State private var showHighlights = false
 
+    // TTS 状态
+    @StateObject private var ttsService = TTSService.shared
+    @State private var showTTSSettings = false
+
     // 阅读时长统计
     @State private var sessionStartTime: Date?
 
@@ -32,8 +36,9 @@ struct PDFReaderView: View {
                     .animation(.easeInOut(duration: 0.2), value: isImmersive)
 
                 if let document = pdfDocument {
-                    PDFKitView(document: document, currentPage: $currentPage)
-                        .gesture(combinedGestures)
+                    PDFKitView(document: document, currentPage: $currentPage, scrollMode: settings.pdfScrollMode)
+                        .id(settings.pdfScrollMode)
+                        .gesture(settings.pdfScrollMode ? nil : combinedGestures)
                 } else {
                     ProgressView("加载中...")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -57,6 +62,9 @@ struct PDFReaderView: View {
         .sheet(isPresented: $showHighlights) {
             HighlightsListView(book: book)
         }
+        .sheet(isPresented: $showTTSSettings) {
+            TTSSettingsView()
+        }
         .task {
             await loadPDFAsync()
         }
@@ -66,6 +74,10 @@ struct PDFReaderView: View {
         .onDisappear {
             saveReadingPosition()
             recordReadingTime()
+            ttsService.stop()
+        }
+        .onChange(of: currentPage) { _, _ in
+            ttsService.stop()
         }
     }
 
@@ -99,6 +111,12 @@ struct PDFReaderView: View {
                 HStack(spacing: 16) {
                     Button(action: { showHighlights = true }) {
                         Image(systemName: "highlighter")
+                            .font(.title3)
+                            .foregroundColor(.blue)
+                    }
+
+                    Button(action: { showTTSSettings = true }) {
+                        Image(systemName: ttsService.isPlaying ? "speaker.wave.2.fill" : "speaker.slash.fill")
                             .font(.title3)
                             .foregroundColor(.blue)
                     }
@@ -268,6 +286,51 @@ struct PDFReaderView: View {
                 .disabled(pdfDocument == nil || currentPage >= (pdfDocument?.pageCount ?? 1))
                 .buttonStyle(.bordered)
             }
+
+            // TTS 控制条
+            if ttsService.isPlaying || ttsService.isPaused {
+                HStack(spacing: 16) {
+                    Button(action: { startTTS() }) {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.body)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    if ttsService.isPlaying {
+                        Button(action: { ttsService.pause() }) {
+                            Image(systemName: "pause.fill")
+                                .font(.body)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    } else {
+                        Button(action: { ttsService.play() }) {
+                            Image(systemName: "play.fill")
+                                .font(.body)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+
+                    Button(action: { ttsService.stop() }) {
+                        Image(systemName: "stop.fill")
+                            .font(.body)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Spacer()
+
+                    Button(action: { showTTSSettings = true }) {
+                        Image(systemName: "gear")
+                            .font(.body)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+                .padding(.top, 4)
+            }
         }
         .padding()
         .background(Color(hex: settings.currentBackgroundColor) ?? Color(hex: "#1C1C1E"))
@@ -310,6 +373,42 @@ struct PDFReaderView: View {
         sessionStartTime = nil
     }
 
+    // MARK: - TTS 朗读
+    private func startTTS() {
+        guard let document = pdfDocument,
+              let page = document.page(at: currentPage - 1) else { return }
+
+        // 提取当前页文本
+        var pageText = page.string ?? ""
+
+        // 如果当前页没有文本，尝试用 selection 方式提取
+        if pageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let pageBounds = page.bounds(for: .mediaBox)
+            if let selection = page.selection(for: pageBounds) {
+                pageText = selection.string ?? ""
+            }
+        }
+
+        // 清理空白字符
+        pageText = pageText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !pageText.isEmpty else { return }
+
+        // 停止当前朗读
+        ttsService.stop()
+
+        // 创建章节
+        let chapter = PDFPageChapter(
+            chapterId: "page_\(currentPage - 1)",
+            chapterTitle: "第 \(currentPage) 页",
+            chapterContent: pageText
+        )
+
+        // 配置并播放
+        ttsService.configure(chapters: [chapter], startChapter: 0)
+        ttsService.play()
+    }
+
     private func formatFileSize(_ bytes: Int64) -> String {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
@@ -320,18 +419,25 @@ struct PDFReaderView: View {
 struct PDFKitView: UIViewRepresentable {
     let document: PDFDocument
     @Binding var currentPage: Int
+    var scrollMode: Bool = true
 
     func makeUIView(context: Context) -> PDFView {
         let pdfView = PDFView()
         pdfView.document = document
         pdfView.autoScales = true
-        pdfView.displayMode = .singlePage
+        pdfView.displayMode = scrollMode ? .singlePageContinuous : .singlePage
+        pdfView.displayDirection = scrollMode ? .vertical : .horizontal
         return pdfView
     }
 
     func updateUIView(_ pdfView: PDFView, context: Context) {
-        if let page = document.page(at: currentPage - 1) {
-            pdfView.go(to: page)
+        if scrollMode {
+            // 滚动模式下让 PDFView 自由滚动，不需要跳转页面
+        } else {
+            // 滑动模式下跳转页面
+            if let page = document.page(at: currentPage - 1) {
+                pdfView.go(to: page)
+            }
         }
     }
 }

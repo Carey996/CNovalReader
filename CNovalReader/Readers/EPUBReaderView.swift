@@ -22,6 +22,19 @@ struct EPUBReaderView: View {
 
     // 搜索
     @State private var showSearch = false
+    
+    // TTS
+    @StateObject private var ttsService = TTSService.shared
+    @State private var showTTSSettings = false
+    @State private var currentChapterAdapter: EPUBChapterAdapter?
+    
+    // MARK: - 翻页模式状态
+    @State private var pageModeCurrentPage: Int = 0
+    @State private var pageModeTotalPages: Int = 0
+    @State private var pageModePages: [String] = []
+    @State private var pageModeContainerSize: CGSize = .zero
+    @State private var pageModeOffset: CGFloat = 0
+    @State private var isAnimatingPage: Bool = false
 
     @Environment(\.dismiss) private var dismiss
 
@@ -29,11 +42,20 @@ struct EPUBReaderView: View {
 
     private var chapterNumberDisplay: String {
         guard let chapters = epubBook?.chapters, !chapters.isEmpty else { return "" }
+        if settings.pageTurnMode && pageModeTotalPages > 0 {
+            return "第 \(pageModeCurrentPage + 1) / \(pageModeTotalPages) 页"
+        }
         return "第 \(currentChapterIndex + 1) 章 / 共 \(chapters.count) 章"
     }
 
     private var progressPercentage: Double {
         guard let chapters = epubBook?.chapters, !chapters.isEmpty else { return 0 }
+        if settings.pageTurnMode {
+            guard pageModeTotalPages > 0 else { return 0 }
+            let chapterProgress = Double(currentChapterIndex) / Double(chapters.count)
+            let pageInChapter = Double(pageModeCurrentPage) / Double(pageModeTotalPages)
+            return chapterProgress + (pageInChapter / Double(chapters.count))
+        }
         return Double(currentChapterIndex + 1) / Double(chapters.count)
     }
 
@@ -52,7 +74,7 @@ struct EPUBReaderView: View {
                 } else if let error = errorMessage {
                     errorView(error)
                 } else if showContent {
-                    contentView
+                    contentArea
                         .gesture(combinedGestures)
                 } else {
                     loadingView
@@ -63,9 +85,13 @@ struct EPUBReaderView: View {
                     .animation(.easeInOut(duration: 0.2), value: isImmersive)
             }
 
-            // 边缘滑入检测
             if isImmersive {
                 edgeRevealOverlay
+            }
+            
+            if ttsService.isPlaying || ttsService.isPaused {
+                ttsControlBar
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
         .navigationTitle(epubBook?.title ?? "EPUB 阅读器")
@@ -96,6 +122,31 @@ struct EPUBReaderView: View {
                         }
                     }
                 )
+            }
+        }
+        .sheet(isPresented: $showTTSSettings) {
+            TTSSettingsView()
+        }
+        .onChange(of: currentChapterAdapter) { _, newAdapter in
+            if let adapter = newAdapter {
+                ttsService.configure(chapters: [adapter], startChapter: 0)
+            }
+        }
+        .onChange(of: currentChapterIndex) { _, newIndex in
+            if let chapters = epubBook?.chapters, newIndex < chapters.count {
+                let chapter = chapters[newIndex]
+                let adapter = EPUBChapterAdapter(chapter: chapter, content: chapterContent)
+                ttsService.configure(chapters: [adapter], startChapter: 0)
+            }
+        }
+        .onChange(of: settings.fontSize) { _, _ in
+            if settings.pageTurnMode && !chapterContent.isEmpty {
+                recomputePages()
+            }
+        }
+        .onChange(of: settings.lineSpacing) { _, _ in
+            if settings.pageTurnMode && !chapterContent.isEmpty {
+                recomputePages()
             }
         }
         .task {
@@ -166,6 +217,12 @@ struct EPUBReaderView: View {
                             .font(.title3)
                             .foregroundColor(.blue)
                     }
+                    
+                    Button(action: { startTTS() }) {
+                        Image(systemName: ttsService.isPlaying ? "speaker.wave.2.fill" : "speaker.wave.2")
+                            .font(.title3)
+                            .foregroundColor(ttsService.isPlaying ? .green : .blue)
+                    }
                 }
             }
 
@@ -181,7 +238,11 @@ struct EPUBReaderView: View {
                 metadataTag(book.createdAt.formatted(date: .abbreviated, time: .omitted))
 
                 if let chapters = epubBook?.chapters, !chapters.isEmpty {
-                    metadataTag("第\(currentChapterIndex + 1)/\(chapters.count)章")
+                    if settings.pageTurnMode {
+                        metadataTag("第\(pageModeCurrentPage + 1)/\(max(1, pageModeTotalPages))页")
+                    } else {
+                        metadataTag("第\(currentChapterIndex + 1)/\(chapters.count)章")
+                    }
                 }
 
                 if let position = book.readingPosition {
@@ -212,8 +273,179 @@ struct EPUBReaderView: View {
             .cornerRadius(4)
     }
 
-    // MARK: - 内容视图
-    private var contentView: some View {
+    // MARK: - 内容区域（翻页 vs 滚动）
+    @ViewBuilder
+    private var contentArea: some View {
+        if settings.pageTurnMode {
+            pageTurnContentView
+        } else {
+            scrollContentView
+        }
+    }
+    
+    // MARK: - 翻页模式内容视图
+    private var pageTurnContentView: some View {
+        GeometryReader { geo in
+            let containerSize = geo.size
+            
+            ZStack {
+                if pageModePages.isEmpty {
+                    VStack(spacing: 16) {
+                        ProgressView()
+                        Text("计算分页中...")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if pageModeCurrentPage < pageModePages.count {
+                    let currentContent = pageModePages[pageModeCurrentPage]
+                    
+                    VStack(alignment: .leading, spacing: 0) {
+                        // 章节标题（仅第一页显示）
+                        if pageModeCurrentPage == 0 {
+                            if let chapters = epubBook?.chapters, currentChapterIndex < chapters.count {
+                                Text(chapters[currentChapterIndex].title)
+                                    .font(.title2)
+                                    .fontWeight(.bold)
+                                    .foregroundColor(Color(hex: settings.currentTextColor) ?? .white)
+                                    .padding(.bottom, 8)
+                            }
+                        }
+                        
+                        // 页面内容
+                        Text(currentContent)
+                            .font(.system(size: settings.fontSize))
+                            .foregroundColor(Color(hex: settings.currentTextColor) ?? .white)
+                            .lineSpacing(settings.lineSpacing)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 16)
+                    .offset(x: pageModeOffset)
+                    .gesture(pageDragGesture)
+                    .animation(.interactiveSpring(), value: pageModeOffset)
+                }
+                
+                // 页码指示器
+                if settings.pagesModeShowProgress && pageModeTotalPages > 0 {
+                    VStack {
+                        Spacer()
+                        HStack {
+                            Spacer()
+                            Text("\(pageModeCurrentPage + 1) / \(pageModeTotalPages)")
+                                .font(.caption)
+                                .foregroundColor(Color(hex: settings.currentTextColor)?.opacity(0.5) ?? .gray)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(.ultraThinMaterial)
+                                .cornerRadius(12)
+                                .padding(.trailing, 16)
+                                .padding(.bottom, 16)
+                        }
+                    }
+                }
+            }
+            .frame(width: containerSize.width, height: containerSize.height)
+            .background(Color(hex: settings.currentBackgroundColor) ?? Color(hex: "#1C1C1E")!)
+            .onAppear {
+                if pageModeContainerSize != containerSize {
+                    pageModeContainerSize = containerSize
+                    if !chapterContent.isEmpty {
+                        recomputePages()
+                    }
+                }
+            }
+            .onChange(of: containerSize) { _, newSize in
+                pageModeContainerSize = newSize
+                if !chapterContent.isEmpty {
+                    recomputePages()
+                }
+            }
+        }
+    }
+    
+    // MARK: - 翻页拖拽手势
+    private var pageDragGesture: some Gesture {
+        DragGesture(minimumDistance: 20, coordinateSpace: .local)
+            .onChanged { value in
+                guard !isAnimatingPage else { return }
+                pageModeOffset = value.translation.width
+            }
+            .onEnded { value in
+                guard !isAnimatingPage else { return }
+                withAnimation(.interactiveSpring()) {
+                    if value.translation.width > 60 {
+                        goToPreviousPage()
+                    } else if value.translation.width < -60 {
+                        goToNextPage()
+                    }
+                    pageModeOffset = 0
+                }
+            }
+    }
+    
+    // MARK: - 翻页控制
+    private func goToNextPage() {
+        guard pageModeCurrentPage < pageModeTotalPages - 1 else {
+            // 最后一页 → 下一章
+            if let chapters = epubBook?.chapters, currentChapterIndex < chapters.count - 1 {
+                Task {
+                    await loadChapter(currentChapterIndex + 1)
+                }
+            }
+            return
+        }
+        isAnimatingPage = true
+        pageModeCurrentPage += 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            isAnimatingPage = false
+        }
+    }
+    
+    private func goToPreviousPage() {
+        guard pageModeCurrentPage > 0 else {
+            // 第一页 → 上一章
+            if currentChapterIndex > 0 {
+                Task {
+                    await loadChapter(currentChapterIndex - 1)
+                }
+            }
+            return
+        }
+        isAnimatingPage = true
+        pageModeCurrentPage -= 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            isAnimatingPage = false
+        }
+    }
+    
+    // MARK: - 重新计算分页
+    private func recomputePages() {
+        guard pageModeContainerSize.height > 0, !chapterContent.isEmpty else { return }
+        guard let chapters = epubBook?.chapters, currentChapterIndex < chapters.count else { return }
+        
+        let chapterTitle = chapters[currentChapterIndex].title
+        let epubContent = EPUBPaginationStrategy.EPUBChapterContent(title: chapterTitle, content: chapterContent)
+        let fontSize = CGFloat(settings.fontSize)
+        let lineHeight = fontSize + settings.lineSpacing
+        
+        PaginationCalculator.precomputeEPUBTPages(
+            chapter: epubContent,
+            containerSize: pageModeContainerSize,
+            fontSize: fontSize,
+            lineHeight: lineHeight
+        ) { [self] pages in
+            pageModePages = pages
+            pageModeTotalPages = pages.count
+            if pageModeCurrentPage >= pageModeTotalPages && pageModeTotalPages > 0 {
+                pageModeCurrentPage = pageModeTotalPages - 1
+            }
+        }
+    }
+
+    // MARK: - 滚动模式内容视图
+    private var scrollContentView: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
@@ -266,6 +498,9 @@ struct EPUBReaderView: View {
     }
 
     private func handleSwipeEnd(translation: CGSize) {
+        // 翻页模式下由 pageDragGesture 处理
+        guard !settings.pageTurnMode else { return }
+        
         let horizontal = translation.width
         let vertical = translation.height
 
@@ -500,6 +735,11 @@ struct EPUBReaderView: View {
         do {
             chapterContent = try await parsingService.extractChapterContent(book: epub, chapterIndex: index)
             currentChapterIndex = index
+            pageModeCurrentPage = 0
+            
+            if settings.pageTurnMode {
+                recomputePages()
+            }
         } catch {
             chapterContent = "无法加载章节内容: \(error.localizedDescription)"
         }
@@ -526,7 +766,7 @@ struct EPUBReaderView: View {
         book.totalPages = epubBook?.chapters.count
         book.lastReadAt = Date()
         if let total = book.totalPages, total > 0 {
-            book.readingPosition = Double(currentChapterIndex + 1) / Double(total)
+            book.readingPosition = progressPercentage
         }
         book.currentChapterIndex = currentChapterIndex
         if let chapters = epubBook?.chapters, currentChapterIndex < chapters.count {
@@ -550,5 +790,81 @@ struct EPUBReaderView: View {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
         return formatter.string(fromByteCount: bytes)
+    }
+    
+    // MARK: - TTS 方法
+    private func startTTS() {
+        guard let chapters = epubBook?.chapters, currentChapterIndex < chapters.count else { return }
+        let chapter = chapters[currentChapterIndex]
+        let adapter = EPUBChapterAdapter(chapter: chapter, content: chapterContent)
+        ttsService.configure(chapters: [adapter], startChapter: 0)
+        ttsService.play()
+    }
+    
+    // MARK: - TTS 控制条
+    private var ttsControlBar: some View {
+        VStack(spacing: 0) {
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    Rectangle()
+                        .fill(Color.gray.opacity(0.3))
+                        .frame(height: 3)
+                    
+                    Rectangle()
+                        .fill(Color.blue)
+                        .frame(width: geometry.size.width * ttsService.progress, height: 3)
+                }
+                .cornerRadius(1.5)
+            }
+            .frame(height: 3)
+            .padding(.horizontal)
+            .padding(.top, 8)
+            
+            HStack(spacing: 20) {
+                Button(action: { ttsService.previousChapter() }) {
+                    Image(systemName: "backward.fill")
+                        .font(.title3)
+                }
+                .disabled(ttsService.currentChapterIndex <= 0)
+                
+                Button(action: {
+                    if ttsService.isPlaying {
+                        ttsService.pause()
+                    } else {
+                        ttsService.play()
+                    }
+                }) {
+                    Image(systemName: ttsService.isPlaying ? "pause.fill" : "play.fill")
+                        .font(.title2)
+                }
+                
+                Button(action: { ttsService.nextChapter() }) {
+                    Image(systemName: "forward.fill")
+                        .font(.title3)
+                }
+                .disabled(ttsService.currentChapterIndex >= 1)
+                
+                Spacer()
+                
+                Text("第 \(ttsService.currentChapterIndex + 1) 章")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                
+                Spacer()
+                
+                Button(action: { showTTSSettings = true }) {
+                    Image(systemName: "gearshape")
+                        .font(.title3)
+                }
+                
+                Button(action: { ttsService.stop() }) {
+                    Image(systemName: "stop.fill")
+                        .font(.title3)
+                }
+            }
+            .padding()
+        }
+        .background(.ultraThinMaterial)
+        .cornerRadius(16, corners: [.topLeft, .topRight])
     }
 }
